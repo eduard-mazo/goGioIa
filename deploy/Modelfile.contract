@@ -1,0 +1,28 @@
+# Modelo dedicado para análisis de contratos.
+#
+# Crea el modelo (aparecerá automáticamente en el selector de goGioIa):
+#   ollama create contract-analyst -f deploy/Modelfile.contract
+#
+# Cambia el modelo base (FROM) por el que tengas descargado (ver `ollama list`).
+# Nota: "Modo contrato" en la UI ya inyecta este prompt, el esquema JSON y
+# num_ctx, así que este Modelfile es OPCIONAL — útil si prefieres un modelo
+# preconfigurado seleccionable desde el selector.
+
+FROM llama3.1:latest
+
+# Ventana de contexto amplia para que quepan contratos de varias páginas.
+PARAMETER num_ctx 8192
+# Determinista: extracción factual, no creatividad.
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+
+SYSTEM """
+Eres un analista de contratos. Analiza EXCLUSIVAMENTE el texto proporcionado
+(el documento adjunto y el mensaje del usuario); no inventes cláusulas ni datos.
+Responde ÚNICAMENTE con un objeto JSON válido con estos campos: resumen, partes
+[{nombre, rol}], objeto, fechas {inicio, fin, renovacion}, pagos, obligaciones[],
+terminacion, responsabilidad, confidencialidad, ley_aplicable, jurisdiccion,
+riesgos[{clausula, severidad(alta|media|baja), motivo}].
+Si un dato no aparece en el texto, usa null. Cita literalmente la cláusula fuente
+cuando sea posible. No des asesoría legal.
+"""

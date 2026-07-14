@@ -1,0 +1,71 @@
+# Podman Quadlet — unidad systemd (ROOTLESS / a nivel de usuario) para goGioIa
+# ============================================================================
+#
+# INSTALACIÓN (ejecutar como el usuario de servicio en el host ppc64le):
+#
+#   1. Cargar la imagen (una vez, sin conexión):
+#        podman load -i gogioia-ppc64le.tar
+#
+#   2. Instalar este archivo:
+#        mkdir -p ~/.config/containers/systemd
+#        cp gogioia.container ~/.config/containers/systemd/gogioia.container
+#
+#   3. Recargar y arrancar:
+#        systemctl --user daemon-reload
+#        systemctl --user start gogioia
+#      NOTA: NO uses `systemctl --user enable` con unidades Quadlet: son
+#      unidades generadas y fallará con "is transient or generated". El
+#      arranque automático ya lo gestiona la sección [Install] de abajo.
+#
+#   4. Permitir que siga corriendo tras cerrar sesión / arranque (linger):
+#        loginctl enable-linger "$USER"
+#
+#   5. Verificar:
+#        systemctl --user status gogioia
+#        journalctl --user -u gogioia -f
+#
+# ACTUALIZACIÓN:
+#   podman load -i gogioia-ppc64le_1.tar
+#   podman tag <nuevo-id> localhost/gogioia:ppc64le
+#   systemctl --user restart gogioia
+
+[Unit]
+Description=goGioIa — Asistente de IA local (Ollama)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Container]
+# Imagen cargada sin conexión:  podman load -i gogioia-ppc64le.tar
+Image=localhost/gogioia:ppc64le
+Pull=never
+ContainerName=gogioia
+
+# Solo se publica el puerto de la UI/API. El tráfico saliente hacia Ollama
+# funciona con red en modo bridge.
+PublishPort=8080:8080
+
+# Configuración por entorno (equivale a las flags --port/--ollama/--model).
+Environment=WEB_PORT=:8080
+Environment=OLLAMA_API=http://10.14.16.193:9091/api/chat
+Environment=MODEL_NAME=llama3
+
+# App sin estado + binario estático en un puerto >1024 => no requiere
+# capacidades ni sistema de archivos escribible.
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+
+# Las cargas de PDF se procesan en memoria (sin volcado a disco), por lo que no
+# se necesita ningún volumen ni tmpfs. Si algún día subes el límite de tamaño
+# por encima del límite en memoria, añade un directorio temporal en RAM:
+#   Tmpfs=/tmp:rw,size=64M,mode=1777
+
+[Service]
+Restart=always
+# Presupuesto de apagado: cierre de HTTP + streams SSE en curso.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

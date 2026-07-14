@@ -1,0 +1,42 @@
+# ─── Stage 0: extract CA bundle + timezone data from Alpine ppc64le ──────────
+# Runs on the build host (x86-64 with binfmt_misc/qemu), not on the target.
+# Its only purpose is to produce the few files a FROM scratch image cannot
+# generate itself. Nothing else from this layer is shipped.
+FROM --platform=$BUILDPLATFORM alpine:3.21 AS rootfs
+RUN apk add --no-cache ca-certificates tzdata && \
+    printf 'nobody:x:65534:65534:nobody:/:/sbin/nologin\n' > /nobody.passwd && \
+    printf 'nogroup:x:65534:\n'                            > /nogroup.group
+
+# ─── Final image — FROM scratch, no shell, no package manager ────────────────
+FROM scratch
+
+LABEL org.opencontainers.image.title="goGioIa" \
+      org.opencontainers.image.description="Asistente de IA local (Ollama) con assets embebidos" \
+      org.opencontainers.image.architecture="linux/ppc64le" \
+      org.opencontainers.image.licenses="Proprietary"
+
+# TLS trust store — only needed if OLLAMA_API points at an https endpoint.
+# The Go TLS stack reads this file directly; no OpenSSL.
+COPY --from=rootfs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Timezone database — for any time.LoadLocation() and correct log timestamps.
+COPY --from=rootfs /usr/share/zoneinfo /usr/share/zoneinfo
+
+# Minimal passwd/group so the "nobody" user (65534) resolves cleanly.
+COPY --from=rootfs /nobody.passwd /etc/passwd
+COPY --from=rootfs /nogroup.group /etc/group
+
+# Pre-built static binary (make build-ppc64le): a fully static ppc64le ELF
+# (CGO_ENABLED=0, no interpreter). The entire frontend is embedded via
+# //go:embed, so no assets are copied here.
+COPY bin/gogioia-linux-ppc64le /usr/local/bin/gogioia
+
+# HTTP UI + API. There is NO writable volume: the app is stateless and PDF
+# uploads are processed in memory (see internal/server/handlers.go), so the
+# container runs with a read-only root filesystem.
+EXPOSE 8080
+
+# Run as nobody:nogroup — matches UID/GID 65534 baked into /etc/passwd above.
+USER 65534:65534
+
+ENTRYPOINT ["/usr/local/bin/gogioia"]

@@ -1,0 +1,9 @@
+# Keep the Docker build context tiny — the scratch image needs only the
+# pre-built ppc64le binary under bin/.
+frontend/node_modules
+frontend/.vite
+web/dist
+.git
+*.tar
+bin/gogioia
+bin/gogioia-linux-amd64
