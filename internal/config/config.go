@@ -26,6 +26,9 @@ type Config struct {
 	// ChunkSize / ChunkOverlap control document chunking (in characters).
 	ChunkSize    int
 	ChunkOverlap int
+	// EmbedBatch is how many chunks are vectorised per Ollama /api/embed call.
+	// Lower it if the Ollama host resets connections under sustained load.
+	EmbedBatch int
 
 	// ── Oracle 23ai (vector store) ─────────────────────────────────────────
 	OracleUser     string
@@ -48,6 +51,7 @@ const (
 	defaultRAGTopK      = 5
 	defaultChunkSize    = 1800 // ~450 tokens por chunk
 	defaultChunkOverlap = 250
+	defaultEmbedBatch   = 8
 
 	defaultOracleUser     = ""
 	defaultOraclePassword = ""
@@ -68,6 +72,7 @@ func Load() Config {
 		RAGTopK:      envInt("RAG_TOP_K", defaultRAGTopK),
 		ChunkSize:    envInt("RAG_CHUNK_SIZE", defaultChunkSize),
 		ChunkOverlap: envInt("RAG_CHUNK_OVERLAP", defaultChunkOverlap),
+		EmbedBatch:   envInt("RAG_EMBED_BATCH", defaultEmbedBatch),
 
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),

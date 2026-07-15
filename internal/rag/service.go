@@ -26,9 +26,6 @@ const (
 	queryPrefix = "search_query: "
 )
 
-// embedBatchSize limita cuántos chunks se vectorizan por llamada a Ollama.
-const embedBatchSize = 16
-
 // maxContextChunkChars recorta cada chunk citado en el prompt.
 const maxContextChunkChars = 2000
 
@@ -143,15 +140,16 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 	}
 
 	// 3. Embeddings por lotes + inserción en el vector store.
-	for from := 0; from < len(chunks); from += embedBatchSize {
-		batch := chunks[from:min(from+embedBatchSize, len(chunks))]
+	batchSize := s.cfg.EmbedBatch
+	for from := 0; from < len(chunks); from += batchSize {
+		batch := chunks[from:min(from+batchSize, len(chunks))]
 		inputs := make([]string, len(batch))
 		for i, c := range batch {
 			inputs[i] = docPrefix + c.Text
 		}
-		vectors, err := s.ollama.Embed(ctx, s.cfg.EmbedModel, inputs)
+		vectors, err := s.embedBatch(ctx, inputs)
 		if err != nil {
-			fail("embeddings", err)
+			fail("embeddings", fmt.Errorf("chunks %d-%d de %d: %w", from+1, from+len(batch), len(chunks), err))
 			return
 		}
 		for i, c := range batch {
@@ -169,6 +167,27 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		return
 	}
 	log.Printf("rag: %q ingerido (%d páginas, %d chunks)", fileName, len(pages), len(chunks))
+}
+
+// embedBatch vectoriza un lote y, si el lote completo falla pese a los
+// reintentos del cliente (p.ej. el runner de Ollama se reinició bajo carga),
+// degrada a vectorizar de una en una para aislar el fallo en vez de perder
+// toda la ingesta.
+func (s *Service) embedBatch(ctx context.Context, inputs []string) ([][]float32, error) {
+	vecs, err := s.ollama.Embed(ctx, s.cfg.EmbedModel, inputs)
+	if err == nil || len(inputs) == 1 {
+		return vecs, err
+	}
+	log.Printf("rag: lote de %d embeddings falló (%v); reintentando de uno en uno", len(inputs), err)
+	out := make([][]float32, 0, len(inputs))
+	for i, in := range inputs {
+		vec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, in)
+		if err != nil {
+			return nil, fmt.Errorf("entrada %d del lote: %w", i+1, err)
+		}
+		out = append(out, vec)
+	}
+	return out, nil
 }
 
 // ── Consulta (retrieval + prompt) ────────────────────────────────────────

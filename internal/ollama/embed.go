@@ -6,13 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 )
 
-// embedTimeout limita cada llamada de embeddings (los lotes pueden tardar).
+// embedTimeout limita cada intento de embeddings (los lotes pueden tardar).
 const embedTimeout = 120 * time.Second
+
+// embedAttempts reintenta fallos transitorios (connection reset, 5xx…): bajo
+// carga sostenida el runner de Ollama puede reciclarse y cortar la conexión.
+const embedAttempts = 3
 
 // embedRequest es el payload del endpoint moderno /api/embed (acepta lotes).
 type embedRequest struct {
@@ -39,49 +44,83 @@ type legacyEmbedResponse struct {
 
 // Embed genera un embedding por cada texto de entrada usando el modelo dado
 // (p.ej. nomic-embed-text → 768 dimensiones). Intenta el endpoint por lotes
-// /api/embed y, si el host no lo soporta, recurre a /api/embeddings.
+// /api/embed y, si el host no lo soporta, recurre a /api/embeddings. Los
+// fallos transitorios se reintentan con pausa creciente antes de rendirse.
 func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]float32, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
-	defer cancel()
-
 	body, err := json.Marshal(embedRequest{Model: model, Input: inputs})
 	if err != nil {
 		return nil, err
 	}
+
+	var lastErr error
+	for attempt := 1; attempt <= embedAttempts; attempt++ {
+		if attempt > 1 {
+			// Pausa creciente (3s, 6s): da tiempo a que el runner se recupere.
+			wait := time.Duration(attempt-1) * 3 * time.Second
+			log.Printf("ollama: embed falló (%v); reintento %d/%d en %s", lastErr, attempt, embedAttempts, wait)
+			select {
+			case <-ctx.Done():
+				return nil, lastErr
+			case <-time.After(wait):
+			}
+		}
+		vecs, retryable, err := c.embedOnce(ctx, model, inputs, body)
+		if err == nil {
+			return vecs, nil
+		}
+		lastErr = err
+		if !retryable || ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("%w (tras %d intentos)", lastErr, embedAttempts)
+}
+
+// embedOnce ejecuta un intento contra /api/embed. retryable indica si el
+// fallo es plausiblemente transitorio (error de transporte o 5xx) y merece
+// otro intento; los errores del API (payload inválido, modelo inexistente…)
+// son definitivos.
+func (c *Client) embedOnce(ctx context.Context, model string, inputs []string, body []byte) (vecs [][]float32, retryable bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/api/embed", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("no se pudo contactar Ollama (embeddings): %w", err)
+		return nil, true, fmt.Errorf("no se pudo contactar Ollama (embeddings): %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return c.embedLegacy(ctx, model, inputs)
+		vecs, err := c.embedLegacy(ctx, model, inputs)
+		return vecs, false, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("ollama embed devolvió %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		return nil, resp.StatusCode >= 500,
+			fmt.Errorf("ollama embed devolvió %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
 	}
 
 	var er embedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
-		return nil, err
+		// La conexión también puede cortarse a mitad de la respuesta.
+		return nil, true, fmt.Errorf("leer respuesta de embeddings: %w", err)
 	}
 	if er.Error != "" {
-		return nil, fmt.Errorf("ollama embed: %s", er.Error)
+		return nil, false, fmt.Errorf("ollama embed: %s", er.Error)
 	}
 	if len(er.Embeddings) != len(inputs) {
-		return nil, fmt.Errorf("ollama embed devolvió %d vectores para %d entradas", len(er.Embeddings), len(inputs))
+		return nil, false, fmt.Errorf("ollama embed devolvió %d vectores para %d entradas", len(er.Embeddings), len(inputs))
 	}
-	return er.Embeddings, nil
+	return er.Embeddings, false, nil
 }
 
 // EmbedOne es un atajo para una única entrada (p.ej. la pregunta del usuario).

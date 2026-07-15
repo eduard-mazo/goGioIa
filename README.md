@@ -107,6 +107,7 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `RAG_TOP_K`         | `5`                                 | Chunks retrieved per question        |
 | `RAG_CHUNK_SIZE`    | `1800`                              | Chunk size (characters)              |
 | `RAG_CHUNK_OVERLAP` | `250`                               | Chunk overlap (characters)           |
+| `RAG_EMBED_BATCH`   | `8`                                 | Chunks per `/api/embed` call         |
 | `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
 | `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
 | `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |
