@@ -105,7 +105,7 @@ func (s *Store) seedTemplate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO prompt_templates (template_id, name, version, template_text, is_active)
 		 VALUES (:1, :2, 1, :3, 'Y')`,
-		newID(), defaultTemplateName, go_ora.Clob{String: defaultTemplateText})
+		newID(), defaultTemplateName, clob(defaultTemplateText))
 	return err
 }
 
@@ -136,6 +136,13 @@ func SessionID(clientID string) []byte {
 	return sum[:16]
 }
 
+// clob construye un bind CLOB no nulo. go-ora exige Valid=true en los binds
+// de entrada: con el zero value el driver envía NULL (ORA-01400 en columnas
+// NOT NULL), así que todo CLOB del paquete debe pasar por aquí.
+func clob(s string) go_ora.Clob {
+	return go_ora.Clob{String: s, Valid: true}
+}
+
 // vecLiteral serializa un embedding al literal que acepta TO_VECTOR: [x,y,...].
 // Se envía como CLOB porque 768 floats superan los 4000 bytes de VARCHAR2.
 func vecLiteral(v []float32) go_ora.Clob {
@@ -149,7 +156,7 @@ func vecLiteral(v []float32) go_ora.Clob {
 		b.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
 	}
 	b.WriteByte(']')
-	return go_ora.Clob{String: b.String()}
+	return clob(b.String())
 }
 
 // ── Documentos ───────────────────────────────────────────────────────────
@@ -291,7 +298,7 @@ func (s *Store) InsertPage(ctx context.Context, docID []byte, pageNumber int, te
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO document_pages (page_id, document_id, page_number, raw_text)
 		VALUES (:1, :2, :3, :4)`,
-		newID(), docID, pageNumber, go_ora.Clob{String: text})
+		newID(), docID, pageNumber, clob(text))
 	return err
 }
 
@@ -302,7 +309,7 @@ func (s *Store) InsertChunk(ctx context.Context, docID []byte, index, page int, 
 		  (chunk_id, document_id, chunk_index, page_number, chunk_text, token_count,
 		   embedding, embedding_model, embedded_at)
 		VALUES (:1, :2, :3, :4, :5, :6, TO_VECTOR(:7), :8, SYSTIMESTAMP)`,
-		newID(), docID, index, page, go_ora.Clob{String: text}, tokenCount,
+		newID(), docID, index, page, clob(text), tokenCount,
 		vecLiteral(embedding), model)
 	return err
 }
@@ -365,7 +372,7 @@ func (s *Store) CreateQuery(ctx context.Context, sessionID []byte, userID, quest
 		INSERT INTO rag_queries
 		  (query_id, session_id, user_id, query_text, query_embedding, llm_model, prompt_template_id)
 		VALUES (:1, :2, :3, :4, TO_VECTOR(:5), :6, :7)`,
-		id, sessionID, nullable(userID), go_ora.Clob{String: question},
+		id, sessionID, nullable(userID), clob(question),
 		vecLiteral(embedding), llmModel, templateID)
 	if err != nil {
 		return nil, err
@@ -393,7 +400,7 @@ func (s *Store) LogRetrievedChunks(ctx context.Context, queryID []byte, results 
 func (s *Store) SetQueryResponse(ctx context.Context, queryID []byte, response string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE rag_queries SET response_text = :1 WHERE query_id = :2`,
-		go_ora.Clob{String: response}, queryID)
+		clob(response), queryID)
 	return err
 }
 
