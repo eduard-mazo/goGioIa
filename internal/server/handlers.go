@@ -38,7 +38,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleHealth reports whether the configured Ollama endpoint is reachable.
+// handleHealth reports whether the configured Ollama endpoint and the
+// PostgreSQL app store are reachable.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := "online"
 	var detail string
@@ -46,10 +47,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		status = "offline"
 		detail = err.Error()
 	}
+	// EnsureReady es barato una vez inicializado y reintenta la migración si
+	// PostgreSQL estaba caído durante el arranque.
+	pgStatus := "online"
+	var pgDetail string
+	if err := s.pg.EnsureReady(r.Context()); err != nil {
+		pgStatus = "offline"
+		pgDetail = err.Error()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ollama": status,
-		"detail": detail,
-		"model":  s.cfg.ModelName,
+		"ollama":          status,
+		"detail":          detail,
+		"model":           s.cfg.ModelName,
+		"postgres":        pgStatus,
+		"postgres_detail": pgDetail,
 	})
 }
 

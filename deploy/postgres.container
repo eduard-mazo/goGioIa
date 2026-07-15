@@ -1,0 +1,42 @@
+# Podman Quadlet — PostgreSQL 16 para goGioIa (datos de aplicación:
+# usuarios, sesiones, MFA, configuración, uso de tokens y auditoría).
+# ============================================================================
+# Instalación (mismo flujo que gogioia.container):
+#   cp postgres.container ~/.config/containers/systemd/gogioia-postgres.container
+#   systemctl --user daemon-reload && systemctl --user start gogioia-postgres
+#
+# La imagen puede cargarse offline igual que la de la app:
+#   podman pull docker.io/library/postgres:16   (en una máquina con salida)
+#   podman save -o postgres16.tar docker.io/library/postgres:16
+#   podman load -i postgres16.tar               (en el destino)
+
+[Unit]
+Description=PostgreSQL 16 — base de datos de aplicación de goGioIa
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=docker.io/library/postgres:16
+ContainerName=gogioia-postgres
+
+# Escuchar solo en loopback: únicamente el backend goGioIa (misma máquina)
+# debe alcanzar la base. Si la app corre en otro host, cambiar por la IP
+# interna y restringir por firewall.
+PublishPort=127.0.0.1:5432:5432
+
+Environment=POSTGRES_USER=admin
+Environment=POSTGRES_DB=mydb
+# La contraseña NO va en este archivo (queda en el repo/paquete): crear un
+# secret de podman una única vez en el host destino:
+#   printf '%s' 'LaClaveReal' | podman secret create pg_password -
+Secret=pg_password,type=env,target=POSTGRES_PASSWORD
+
+# Persistencia de datos (volumen nombrado gestionado por podman).
+Volume=gogioia-pgdata:/var/lib/postgresql/data
+
+[Service]
+Restart=always
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

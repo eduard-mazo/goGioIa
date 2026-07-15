@@ -51,6 +51,21 @@ Environment=WEB_PORT=:8080
 Environment=OLLAMA_API=http://10.14.16.193:9091/api/chat
 Environment=MODEL_NAME=llama3
 
+# PostgreSQL 16 (datos de aplicación; ver postgres.container). Con red bridge,
+# "host.containers.internal" apunta al host donde publica gogioia-postgres.
+Environment=POSTGRES_HOST=host.containers.internal
+Environment=POSTGRES_PORT=5432
+Environment=POSTGRES_USER=admin
+Environment=POSTGRES_DB=mydb
+# La contraseña NO va en este archivo: usar el mismo secret de podman que
+# postgres.container (printf '%s' 'LaClaveReal' | podman secret create pg_password -):
+Secret=pg_password,type=env,target=POSTGRES_PASSWORD
+# Opcional: credenciales del admin inicial sembrado en el primer arranque.
+# Si se omiten, se genera una contraseña aleatoria y se imprime una vez en
+# `journalctl --user -u gogioia`.
+#Environment=GOGIOIA_ADMIN_EMAIL=admin@gogioia.local
+#Environment=GOGIOIA_ADMIN_PASSWORD=
+
 # App sin estado + binario estático en un puerto >1024 => no requiere
 # capacidades ni sistema de archivos escribible.
 ReadOnly=true

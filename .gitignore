@@ -19,3 +19,6 @@ npm-debug.log*
 
 # Deploy artefacts
 *.tar
+
+# Secretos locales de desarrollo (nunca versionar)
+*.local.env

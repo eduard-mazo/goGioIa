@@ -3,21 +3,32 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"goGioIa/internal/auth"
 	"goGioIa/internal/config"
 	"goGioIa/internal/server"
 )
 
 func main() {
+	// Subcomandos utilitarios (mismo binario que el servidor):
+	//   echo -n 'MiClave' | gogioia hash-password   → hash argon2id (PHC)
+	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
+		hashPasswordCmd()
+		return
+	}
+
 	// Flags default to the env/compile-time config, so precedence is
 	// flag > environment variable > default.
 	cfg := config.Load()
@@ -29,6 +40,11 @@ func main() {
 	cfg.WebPort = config.NormalizePort(*port)
 	cfg.OllamaAPI = *ollama
 	cfg.ModelName = *model
+
+	if cfg.PGPassword == "" {
+		log.Printf("aviso: POSTGRES_PASSWORD no definida — PostgreSQL fallará al autenticar " +
+			"(en desarrollo: set -a; . deploy/dev.local.env; set +a)")
+	}
 
 	srv := server.New(cfg)
 
@@ -58,4 +74,23 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
+}
+
+// hashPasswordCmd lee una contraseña por stdin (evita dejarla en el historial
+// del shell) e imprime su hash argon2id, útil para seeds manuales por SQL.
+func hashPasswordCmd() {
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		log.Fatalf("leer contraseña de stdin: %v", err)
+	}
+	password := strings.TrimRight(line, "\r\n")
+	if len(password) < 12 {
+		log.Fatal("la contraseña debe tener al menos 12 caracteres")
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		log.Fatalf("hashear: %v", err)
+	}
+	fmt.Println(hash)
 }

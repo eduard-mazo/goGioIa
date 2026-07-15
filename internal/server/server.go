@@ -6,13 +6,17 @@ import (
 	"context"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
 
 	"goGioIa/internal/config"
+	"goGioIa/internal/httpmw"
 	"goGioIa/internal/ollama"
+	"goGioIa/internal/pgstore"
 	"goGioIa/internal/rag"
 	"goGioIa/internal/store"
 	"goGioIa/web"
@@ -23,9 +27,11 @@ type Server struct {
 	cfg    config.Config
 	ollama *ollama.Client
 	store  *store.Store
+	pg     *pgstore.Store
 	rag    *rag.Service
 	dist   fs.FS
 	index  []byte
+	logger *slog.Logger
 }
 
 // New constructs a Server, loading the embedded frontend assets.
@@ -43,8 +49,12 @@ func New(cfg config.Config) *Server {
 	if err != nil {
 		log.Fatalf("open Oracle vector store: %v", err)
 	}
-	// Bootstrap del esquema en segundo plano: si Oracle está caído en el
-	// arranque, cada petición RAG lo reintenta vía EnsureReady.
+	pg, err := pgstore.Open(cfg)
+	if err != nil {
+		log.Fatalf("open PostgreSQL app store: %v", err)
+	}
+	// Bootstrap de los esquemas en segundo plano: si Oracle/PostgreSQL están
+	// caídos en el arranque, cada uso posterior reintenta vía EnsureReady.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -52,13 +62,22 @@ func New(cfg config.Config) *Server {
 			log.Printf("aviso: oracle no disponible aún: %v", err)
 		}
 	}()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := pg.EnsureReady(ctx); err != nil {
+			log.Printf("aviso: postgres no disponible aún: %v", err)
+		}
+	}()
 	return &Server{
 		cfg:    cfg,
 		ollama: ol,
 		store:  st,
+		pg:     pg,
 		rag:    rag.New(cfg, st, ol),
 		dist:   dist,
 		index:  index,
+		logger: slog.New(slog.NewJSONHandler(os.Stdout, nil)),
 	}
 }
 
@@ -83,7 +102,12 @@ func (s *Server) Handler() http.Handler {
 	// Everything else is the SPA (static assets + client-side routes).
 	mux.Handle("/", s.staticHandler())
 
-	return withLogging(mux)
+	return httpmw.Chain(mux,
+		httpmw.RequestID,
+		httpmw.Logging(s.logger),
+		httpmw.Recover(s.logger),
+		httpmw.SecureHeaders,
+	)
 }
 
 // staticHandler serves embedded files and falls back to index.html for
@@ -113,15 +137,4 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(s.index)
-}
-
-// withLogging is a tiny request-logging middleware.
-func withLogging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("%s %s (%s)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
-		}
-	})
 }

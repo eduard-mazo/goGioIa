@@ -33,6 +33,27 @@ type Config struct {
 	OracleHost     string
 	OraclePort     int
 	OracleSID      string
+
+	// ── PostgreSQL 16 (datos de aplicación: auth, sesiones, configuración,
+	// uso de tokens, auditoría) ────────────────────────────────────────────
+	PGHost     string
+	PGPort     int
+	PGUser     string
+	PGPassword string
+	PGDatabase string
+	PGSSLMode  string
+	// AdminEmail/AdminPassword siembran el usuario admin inicial en el primer
+	// arranque. Si la contraseña queda vacía se genera una aleatoria y se
+	// imprime una única vez en el log.
+	AdminEmail    string
+	AdminPassword string
+}
+
+// PGConnString arma el DSN de PostgreSQL en formato URL para pgx.
+func (c Config) PGConnString() string {
+	return "postgres://" + c.PGUser + ":" + c.PGPassword + "@" +
+		c.PGHost + ":" + strconv.Itoa(c.PGPort) + "/" + c.PGDatabase +
+		"?sslmode=" + c.PGSSLMode
 }
 
 // Defaults. Override any of these with the matching environment variable.
@@ -54,6 +75,15 @@ const (
 	defaultOracleHost     = "127.0.0.1"
 	defaultOraclePort     = 1521
 	defaultOracleSID      = "orcl"
+
+	// PostgreSQL 16. La contraseña NO tiene default a propósito (no debe
+	// vivir en el repositorio): definir POSTGRES_PASSWORD en el entorno o
+	// cargar deploy/dev.local.env en desarrollo.
+	defaultPGHost     = "localhost"
+	defaultPGPort     = 5432
+	defaultPGUser     = "admin"
+	defaultPGDatabase = "mydb"
+	defaultPGSSLMode  = "disable"
 )
 
 // Load builds a Config from the environment, applying defaults where unset.
@@ -74,6 +104,15 @@ func Load() Config {
 		OracleHost:     env("ORACLE_HOST", defaultOracleHost),
 		OraclePort:     envInt("ORACLE_PORT", defaultOraclePort),
 		OracleSID:      env("ORACLE_SID", defaultOracleSID),
+
+		PGHost:        env("POSTGRES_HOST", defaultPGHost),
+		PGPort:        envInt("POSTGRES_PORT", defaultPGPort),
+		PGUser:        env("POSTGRES_USER", defaultPGUser),
+		PGPassword:    env("POSTGRES_PASSWORD", ""),
+		PGDatabase:    env("POSTGRES_DB", defaultPGDatabase),
+		PGSSLMode:     env("POSTGRES_SSLMODE", defaultPGSSLMode),
+		AdminEmail:    env("GOGIOIA_ADMIN_EMAIL", "admin@gogioia.local"),
+		AdminPassword: env("GOGIOIA_ADMIN_PASSWORD", ""),
 	}
 }
 
