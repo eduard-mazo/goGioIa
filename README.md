@@ -8,6 +8,10 @@ with no external assets, CDN calls, or runtime dependencies.
 ## Features
 
 - **Streaming chat** — tokens are streamed from Ollama to the browser over SSE.
+- **RAG assistant (Oracle 23ai)** — upload PDFs to a knowledge base backed by
+  Oracle 23ai vector search; questions are answered by Mistral grounded in the
+  retrieved context, with cited sources and user feedback. See
+  [RAG](#rag--asistente-con-base-de-conocimiento-oracle-23ai) below.
 - **Rich Markdown rendering** — headings, tables, lists, blockquotes, and
   syntax-highlighted code blocks with one-click copy.
 - **PDF context** — attach a PDF; text is extracted server-side (pure Go) and
@@ -22,28 +26,72 @@ goGioIa/
 ├── cmd/server/          # main entrypoint
 ├── internal/
 │   ├── config/          # env-driven configuration
-│   ├── ollama/          # streaming Ollama /api/chat client
-│   ├── pdf/             # pure-Go PDF text extraction
+│   ├── ollama/          # streaming Ollama /api/chat client + /api/embed
+│   ├── pdf/             # pure-Go PDF text extraction (whole doc + per page)
+│   ├── rag/             # RAG pipeline: chunking, ingestion, retrieval, prompt
+│   ├── store/           # Oracle 23ai vector store (go-ora, no CGO)
 │   └── server/          # HTTP routing, SSE, static SPA serving
+├── deploy/
+│   └── oracle_schema.sql# reference DDL (auto-created on first boot)
 ├── web/
 │   ├── embed.go         # //go:embed of the built frontend
 │   └── dist/            # Vite build output (embedded)
 └── frontend/            # Vue 3 + TS + Vite + Tailwind v4 source
     └── src/
-        ├── components/  # UI + chat components
-        ├── composables/ # useChat (state + streaming)
+        ├── components/  # UI + chat components (incl. KnowledgeBase)
+        ├── composables/ # useChat (state + streaming + RAG mode)
         └── lib/         # api client, markdown, utils
 ```
 
 ### API
 
-| Method | Path          | Purpose                                        |
-| ------ | ------------- | ---------------------------------------------- |
-| GET    | `/api/config` | Model name and app metadata                    |
-| GET    | `/api/health` | Ollama reachability                            |
-| POST   | `/api/chat`   | Chat completion, streamed back as SSE          |
-| POST   | `/api/pdf`    | Multipart PDF upload → extracted text (JSON)   |
-| GET    | `/*`          | Embedded SPA (with client-side route fallback) |
+| Method | Path                      | Purpose                                          |
+| ------ | ------------------------- | ------------------------------------------------ |
+| GET    | `/api/config`             | Model name and app metadata                      |
+| GET    | `/api/health`             | Ollama reachability                              |
+| POST   | `/api/chat`               | Chat completion, streamed back as SSE            |
+| POST   | `/api/pdf`                | Multipart PDF upload → extracted text (JSON)     |
+| GET    | `/api/rag/health`         | Oracle 23ai status + knowledge-base stats        |
+| GET    | `/api/rag/documents`      | List ingested documents (status, chunks, pages)  |
+| POST   | `/api/rag/documents`      | Upload a PDF → async ingest into the vector store |
+| DELETE | `/api/rag/documents/{id}` | Remove a document and its vectors                |
+| POST   | `/api/rag/ask`            | RAG answer, streamed as SSE (sources → tokens)   |
+| POST   | `/api/rag/feedback`       | Rate an answer (-1/0/1) → `rag_feedback`         |
+| GET    | `/*`                      | Embedded SPA (with client-side route fallback)   |
+
+## RAG — asistente con base de conocimiento (Oracle 23ai)
+
+El modo **asistente RAG** (icono de base de datos en el compositor) responde
+preguntas usando exclusivamente los documentos subidos a la base de
+conocimiento, citando archivo y página de cada fuente.
+
+**Ingesta / «entrenamiento»** — desde el botón **Base de conocimiento** de la
+cabecera se suben PDFs. Cada subida dispara automáticamente el pipeline:
+
+1. `EXTRACTING` — extracción de texto por página (parser puro Go; los PDF
+   escaneados sin capa de texto deben pasar por OCR externo antes de subirse).
+   El texto por página se guarda en `document_pages`.
+2. `CHUNKED` — troceado (~1800 caracteres con solape de 250, cortando en
+   límites de párrafo/frase).
+3. `EMBEDDED` — cada chunk se vectoriza con **nomic-embed-text** (Ollama,
+   768 dims, prefijo `search_document:`) y se inserta en
+   `document_chunks.embedding` (`VECTOR(768, FLOAT32)`).
+
+Los duplicados se detectan por SHA-256 (`uq_documents_hash`); un intento
+fallido (`FAILED`) se puede reintentar subiendo el mismo archivo de nuevo.
+
+**Consulta** — `/api/rag/ask` vectoriza la pregunta (`search_query:`),
+recupera los `RAG_TOP_K` chunks más afines con
+`VECTOR_DISTANCE(embedding, :q, COSINE)`, construye el prompt con la plantilla
+activa de `prompt_templates` y genera la respuesta con **Mistral** en
+streaming. Cada consulta queda trazada en `rag_queries` +
+`rag_retrieved_chunks`, y los pulgares arriba/abajo de la UI alimentan
+`rag_feedback` para mejorar el sistema.
+
+El esquema se crea automáticamente en el primer arranque (ver
+`deploy/oracle_schema.sql`). El índice vectorial
+(`ORGANIZATION INMEMORY NEIGHBOR GRAPH`) requiere `vector_memory_size` en la
+instancia; si no está disponible, la búsqueda funciona en modo exacto.
 
 ## Contract mode (structured analysis)
 
@@ -64,11 +112,21 @@ ollama create contract-analyst -f deploy/Modelfile.contract
 
 Defaults live in `internal/config/config.go` and can be overridden by env vars:
 
-| Variable     | Default                             | Description               |
-| ------------ | ----------------------------------- | ------------------------- |
-| `OLLAMA_API` | `http://10.14.16.193:9091/api/chat` | Ollama chat endpoint URL  |
-| `WEB_PORT`   | `:8080`                             | HTTP listen address       |
-| `MODEL_NAME` | `llama3`                            | Default model (see below) |
+| Variable            | Default                             | Description                          |
+| ------------------- | ----------------------------------- | ------------------------------------ |
+| `OLLAMA_API`        | `http://10.14.16.193:9091/api/chat` | Ollama chat endpoint URL             |
+| `WEB_PORT`          | `:8080`                             | HTTP listen address                  |
+| `MODEL_NAME`        | `llama3.1:latest`                   | Default chat model (see below)       |
+| `EMBED_MODEL`       | `nomic-embed-text`                  | Embeddings model (768 dims)          |
+| `RAG_MODEL`         | `mistral:latest`                    | LLM that answers RAG questions       |
+| `RAG_TOP_K`         | `5`                                 | Chunks retrieved per question        |
+| `RAG_CHUNK_SIZE`    | `1800`                              | Chunk size (characters)              |
+| `RAG_CHUNK_OVERLAP` | `250`                               | Chunk overlap (characters)           |
+| `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
+| `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
+| `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |
+| `ORACLE_PORT`       | `1521`                              | Oracle listener port                 |
+| `ORACLE_SID`        | `orcl`                              | Oracle SID                           |
 
 > Set `MODEL_NAME` to a model you actually have pulled in Ollama, e.g.
 > `mistral`, `llama3`, `qwen2.5`.

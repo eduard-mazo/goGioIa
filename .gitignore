@@ -16,3 +16,6 @@ npm-debug.log*
 # Misc
 .DS_Store
 *.log
+
+# Deploy artefacts
+*.tar

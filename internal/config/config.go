@@ -2,7 +2,10 @@
 // falling back to sane compile-time defaults.
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 // Config holds the application's runtime settings.
 type Config struct {
@@ -12,6 +15,24 @@ type Config struct {
 	WebPort string
 	// ModelName is the default Ollama model used for chat completions.
 	ModelName string
+
+	// ── RAG ────────────────────────────────────────────────────────────────
+	// EmbedModel is the Ollama embeddings model (768 dims → VECTOR(768)).
+	EmbedModel string
+	// RAGModel is the LLM used to answer questions with retrieved context.
+	RAGModel string
+	// RAGTopK is how many chunks are retrieved per question.
+	RAGTopK int
+	// ChunkSize / ChunkOverlap control document chunking (in characters).
+	ChunkSize    int
+	ChunkOverlap int
+
+	// ── Oracle 23ai (vector store) ─────────────────────────────────────────
+	OracleUser     string
+	OraclePassword string
+	OracleHost     string
+	OraclePort     int
+	OracleSID      string
 }
 
 // Defaults. Override any of these with the matching environment variable.
@@ -21,6 +42,18 @@ const (
 	// Must match a model installed on the Ollama host (`ollama list`).
 	// e.g. "llama3.1:latest", "mistral:latest", "qwen2.5:7b".
 	defaultModelName = "llama3.1:latest"
+
+	defaultEmbedModel   = "nomic-embed-text" // 768 dimensiones
+	defaultRAGModel     = "mistral:latest"
+	defaultRAGTopK      = 5
+	defaultChunkSize    = 1800 // ~450 tokens por chunk
+	defaultChunkOverlap = 250
+
+	defaultOracleUser     = ""
+	defaultOraclePassword = ""
+	defaultOracleHost     = "127.0.0.1"
+	defaultOraclePort     = 1521
+	defaultOracleSID      = "orcl"
 )
 
 // Load builds a Config from the environment, applying defaults where unset.
@@ -29,12 +62,33 @@ func Load() Config {
 		OllamaAPI: env("OLLAMA_API", defaultOllamaAPI),
 		WebPort:   NormalizePort(env("WEB_PORT", defaultWebPort)),
 		ModelName: env("MODEL_NAME", defaultModelName),
+
+		EmbedModel:   env("EMBED_MODEL", defaultEmbedModel),
+		RAGModel:     env("RAG_MODEL", defaultRAGModel),
+		RAGTopK:      envInt("RAG_TOP_K", defaultRAGTopK),
+		ChunkSize:    envInt("RAG_CHUNK_SIZE", defaultChunkSize),
+		ChunkOverlap: envInt("RAG_CHUNK_OVERLAP", defaultChunkOverlap),
+
+		OracleUser:     env("ORACLE_USER", defaultOracleUser),
+		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),
+		OracleHost:     env("ORACLE_HOST", defaultOracleHost),
+		OraclePort:     envInt("ORACLE_PORT", defaultOraclePort),
+		OracleSID:      env("ORACLE_SID", defaultOracleSID),
 	}
 }
 
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
 	}
 	return fallback
 }

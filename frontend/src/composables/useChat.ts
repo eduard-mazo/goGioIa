@@ -1,7 +1,19 @@
 import { computed, ref } from 'vue'
-import { streamChat } from '@/lib/api'
+import { sendRagFeedback, streamChat, streamRagAsk } from '@/lib/api'
 import { uid } from '@/lib/utils'
 import type { ApiMessage, AttachedDoc, ChatMessage, Conversation } from '@/types'
+
+// Identifica la sesión del navegador para la trazabilidad en rag_queries.
+const SESSION_KEY = 'gogioia:session'
+
+function sessionId(): string {
+  let id = localStorage.getItem(SESSION_KEY)
+  if (!id) {
+    id = uid()
+    localStorage.setItem(SESSION_KEY, id)
+  }
+  return id
+}
 
 // Conversations live in the browser: this is a local, single-user tool with no
 // server-side store. Cap how many we keep so localStorage can't grow unbounded.
@@ -116,6 +128,8 @@ export function useChat() {
   const model = ref('')
   // When on, replies are structured contract analyses (JSON schema output).
   const contractMode = ref(false)
+  // When on, questions are answered by the RAG assistant (Oracle 23ai + Mistral).
+  const ragMode = ref(localStorage.getItem('gogioia:rag') === '1')
 
   let controller: AbortController | null = null
 
@@ -125,6 +139,13 @@ export function useChat() {
 
   function setContractMode(on: boolean) {
     contractMode.value = on
+    if (on) setRagMode(false)
+  }
+
+  function setRagMode(on: boolean) {
+    ragMode.value = on
+    if (on) contractMode.value = false
+    localStorage.setItem('gogioia:rag', on ? '1' : '0')
   }
 
   const isEmpty = computed(() => messages.value.length === 0)
@@ -181,39 +202,60 @@ export function useChat() {
       createdAt: Date.now(),
     }
     const contract = contractMode.value
+    const rag = ragMode.value
     const assistantMsg: ChatMessage = {
       id: uid(),
       role: 'assistant',
       content: '',
       streaming: true,
-      contract,
+      contract: contract && !rag,
+      rag,
       createdAt: Date.now(),
     }
     convMessages.push(userMsg, assistantMsg)
     if (conv && !conv.title) conv.title = deriveTitle(trimmed)
     touch(conv)
 
-    const payload = buildPayload(convMessages.filter((m) => m.id !== assistantMsg.id))
-
     isStreaming.value = true
     controller = new AbortController()
 
+    const onToken = (token: string) => {
+      const target = convMessages.find((m) => m.id === assistantMsg.id)
+      if (target) target.content += token
+    }
+
     try {
-      await streamChat(
-        payload,
-        {
-          onToken: (token) => {
-            const target = convMessages.find((m) => m.id === assistantMsg.id)
-            if (target) target.content += token
+      if (rag) {
+        // Asistente RAG: el backend recupera contexto de Oracle 23ai y
+        // genera con Mistral; la conversación local no se reenvía.
+        await streamRagAsk(
+          trimmed,
+          sessionId(),
+          {
+            onSources: (queryId, sources) => {
+              const target = convMessages.find((m) => m.id === assistantMsg.id)
+              if (target) {
+                target.queryId = queryId
+                target.sources = sources
+              }
+            },
+            onToken,
           },
-        },
-        {
-          model: model.value,
-          format: contract ? CONTRACT_SCHEMA : undefined,
-          options: chatOptions(contract),
-        },
-        controller.signal,
-      )
+          controller.signal,
+        )
+      } else {
+        const payload = buildPayload(convMessages.filter((m) => m.id !== assistantMsg.id))
+        await streamChat(
+          payload,
+          { onToken },
+          {
+            model: model.value,
+            format: contract ? CONTRACT_SCHEMA : undefined,
+            options: chatOptions(contract),
+          },
+          controller.signal,
+        )
+      }
     } catch (e) {
       // A user-initiated abort is not an error — keep whatever streamed so far.
       if (!(e instanceof DOMException && e.name === 'AbortError')) {
@@ -236,6 +278,15 @@ export function useChat() {
 
   function stop() {
     controller?.abort()
+  }
+
+  /** Valora una respuesta del asistente RAG y persiste la marca en la UI. */
+  async function rateMessage(messageId: string, rating: number) {
+    const msg = messages.value.find((m) => m.id === messageId)
+    if (!msg?.queryId || msg.feedback === rating) return
+    await sendRagFeedback(msg.queryId, rating)
+    msg.feedback = rating
+    touch(activeConv())
   }
 
   function addDoc(doc: AttachedDoc) {
@@ -353,8 +404,11 @@ export function useChat() {
     setModel,
     contractMode,
     setContractMode,
+    ragMode,
+    setRagMode,
     send,
     stop,
+    rateMessage,
     newConversation,
     selectConversation,
     deleteConversation,

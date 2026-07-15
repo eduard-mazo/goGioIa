@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Bot, User } from 'lucide-vue-next'
+import { Bot, Database, FileText, ThumbsDown, ThumbsUp, User } from 'lucide-vue-next'
 import MarkdownRenderer from './MarkdownRenderer.vue'
 import ContractReport from './ContractReport.vue'
 import { t } from '@/i18n'
@@ -8,7 +8,15 @@ import type { ChatMessage, ContractReport as ContractReportData } from '@/types'
 
 const props = defineProps<{ message: ChatMessage }>()
 
+const emit = defineEmits<{
+  feedback: [messageId: string, rating: number]
+}>()
+
 const isUser = props.message.role === 'user'
+
+const showRagMeta = computed(
+  () => !isUser && props.message.rag && !props.message.streaming && !props.message.error,
+)
 
 // Parse a finished contract reply into the structured report (null while
 // streaming or if the model didn't return valid JSON → falls back to markdown).
@@ -47,6 +55,15 @@ const report = computed<ContractReportData | null>(() => {
         {{ t.contract.analyzing }}
       </div>
 
+      <!-- Consultando la base de conocimiento (modo RAG, sin fuentes aún) -->
+      <div
+        v-else-if="!isUser && message.rag && message.streaming && !message.content && !message.sources"
+        class="flex items-center gap-2 text-sm text-muted-foreground"
+      >
+        <span class="status-dot text-primary" />
+        {{ t.rag.searching }}
+      </div>
+
       <!-- Escribiendo (respuesta normal) -->
       <div
         v-else-if="!isUser && message.streaming && !message.content"
@@ -64,6 +81,53 @@ const report = computed<ContractReportData | null>(() => {
         <MarkdownRenderer :content="message.content" :class="{ 'text-destructive': message.error }" />
         <span v-if="message.streaming && message.content" class="stream-caret" />
       </template>
+
+      <!-- Fuentes del RAG (chunks recuperados de Oracle 23ai) -->
+      <div v-if="showRagMeta && message.sources?.length" class="mt-3">
+        <div class="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground">
+          <Database class="h-3 w-3" />
+          {{ t.rag.sources }}
+        </div>
+        <ul class="flex flex-wrap gap-1.5">
+          <li
+            v-for="(src, i) in message.sources"
+            :key="src.chunkId"
+            class="inline-flex max-w-full items-center gap-1.5 rounded-sm border border-border bg-card px-2 py-1 text-xs"
+            :title="src.snippet"
+          >
+            <FileText class="h-3 w-3 shrink-0 text-[color:var(--epm-citrico)]" />
+            <span class="truncate font-medium">[{{ i + 1 }}] {{ src.fileName }}</span>
+            <span class="shrink-0 font-mono text-[10px] text-muted-foreground">
+              {{ t.rag.page }} {{ src.page }} · {{ (src.score * 100).toFixed(0) }}%
+            </span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Feedback sobre la respuesta (se guarda en rag_feedback) -->
+      <div v-if="showRagMeta && message.queryId" class="mt-2 flex items-center gap-1">
+        <button
+          class="grid h-7 w-7 place-items-center rounded-sm border border-border transition hover:bg-muted"
+          :class="message.feedback === 1 ? 'text-[color:var(--signal-ok)] border-[color:var(--signal-ok)]' : 'text-muted-foreground'"
+          :title="t.rag.feedbackUp"
+          :aria-label="t.rag.feedbackUp"
+          @click="emit('feedback', message.id, 1)"
+        >
+          <ThumbsUp class="h-3.5 w-3.5" />
+        </button>
+        <button
+          class="grid h-7 w-7 place-items-center rounded-sm border border-border transition hover:bg-muted"
+          :class="message.feedback === -1 ? 'text-[color:var(--signal-fault)] border-[color:var(--signal-fault)]' : 'text-muted-foreground'"
+          :title="t.rag.feedbackDown"
+          :aria-label="t.rag.feedbackDown"
+          @click="emit('feedback', message.id, -1)"
+        >
+          <ThumbsDown class="h-3.5 w-3.5" />
+        </button>
+        <span v-if="message.feedback" class="ml-1 text-[10px] text-muted-foreground">
+          {{ t.rag.feedbackThanks }}
+        </span>
+      </div>
     </div>
   </div>
 </template>

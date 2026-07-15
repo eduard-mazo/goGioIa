@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
-import { FileSignature, Loader2, Paperclip, Send, Square } from 'lucide-vue-next'
+import { DatabaseZap, FileSignature, Loader2, Paperclip, Send, Square } from 'lucide-vue-next'
 import Button from './ui/Button.vue'
 import { t } from '@/i18n'
 
@@ -8,6 +8,7 @@ const props = defineProps<{
   streaming: boolean
   uploading: boolean
   contractMode: boolean
+  ragMode: boolean
 }>()
 
 const emit = defineEmits<{
@@ -15,6 +16,7 @@ const emit = defineEmits<{
   stop: []
   attach: [file: File]
   toggleContract: []
+  toggleRag: []
 }>()
 
 const text = ref('')
@@ -55,6 +57,9 @@ function onFile(e: Event) {
     <p v-if="contractMode" class="mx-auto mb-2 max-w-3xl text-xs text-muted-foreground">
       {{ t.contract.hint }}
     </p>
+    <p v-else-if="ragMode" class="mx-auto mb-2 max-w-3xl text-xs text-muted-foreground">
+      {{ t.rag.hint }}
+    </p>
     <div
       class="mx-auto flex max-w-3xl items-end gap-2 rounded-md border border-border bg-card p-2 transition focus-within:border-[color:var(--epm-citrico)] focus-within:ring-1 focus-within:ring-ring"
     >
@@ -83,6 +88,15 @@ function onFile(e: Event) {
         @click="emit('toggleContract')"
       >
         <FileSignature />
+      </Button>
+      <Button
+        :variant="ragMode ? 'default' : 'ghost'"
+        size="icon"
+        :title="t.rag.toggle"
+        :aria-pressed="ragMode"
+        @click="emit('toggleRag')"
+      >
+        <DatabaseZap />
       </Button>
 
       <textarea

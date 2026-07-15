@@ -1,4 +1,13 @@
-import type { ApiMessage, HealthStatus, ModelsResponse, PdfResult, ServerConfig } from '@/types'
+import type {
+  ApiMessage,
+  HealthStatus,
+  ModelsResponse,
+  PdfResult,
+  RagDocument,
+  RagHealth,
+  RagSource,
+  ServerConfig,
+} from '@/types'
 
 /** Fetch non-secret server config (model name, etc.). */
 export async function fetchConfig(): Promise<ServerConfig> {
@@ -55,10 +64,139 @@ export async function streamChat(
   opts: ChatOptions = {},
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch('/api/chat', {
+  await streamSSE(
+    '/api/chat',
+    { messages, model: opts.model, format: opts.format, options: opts.options },
+    (event, data) => {
+      switch (event) {
+        case 'message':
+          handlers.onToken((data as { content: string }).content ?? '')
+          return true
+        case 'error':
+          throw new Error((data as { error: string }).error || 'model error')
+        case 'done':
+          handlers.onDone?.()
+          return false
+      }
+      return true
+    },
+    signal,
+  )
+  handlers.onDone?.()
+}
+
+// ── RAG (base de conocimiento en Oracle 23ai) ──────────────────────────────
+
+/** Estado del vector store y del asistente RAG. */
+export async function fetchRagHealth(): Promise<RagHealth> {
+  const res = await fetch('/api/rag/health')
+  if (!res.ok) throw new Error('rag health check failed')
+  return res.json()
+}
+
+/** Lista los documentos de la base de conocimiento. */
+export async function listRagDocuments(): Promise<RagDocument[]> {
+  const res = await fetch('/api/rag/documents')
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `request failed (${res.status})`)
+  return (data.documents ?? []) as RagDocument[]
+}
+
+/**
+ * Sube un PDF a la base de conocimiento; el backend lo procesa en segundo
+ * plano (extracción → chunks → embeddings en Oracle). Devuelve el id asignado.
+ */
+export async function uploadRagDocument(file: File): Promise<{ id: string; fileName: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/rag/documents', { method: 'POST', body: form })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `upload failed (${res.status})`)
+  return data as { id: string; fileName: string }
+}
+
+/** Elimina un documento (y sus chunks) del vector store. */
+export async function deleteRagDocument(id: string): Promise<void> {
+  const res = await fetch(`/api/rag/documents/${id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || `delete failed (${res.status})`)
+  }
+}
+
+/** Valora una respuesta del asistente RAG (-1 | 0 | 1). */
+export async function sendRagFeedback(queryId: string, rating: number, comment = ''): Promise<void> {
+  const res = await fetch('/api/rag/feedback', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, model: opts.model, format: opts.format, options: opts.options }),
+    body: JSON.stringify({ queryId, rating, comment }),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || `feedback failed (${res.status})`)
+  }
+}
+
+interface RagStreamHandlers {
+  /** Fuentes recuperadas de Oracle; llegan antes que el primer token. */
+  onSources: (queryId: string, sources: RagSource[]) => void
+  onToken: (token: string) => void
+  onDone?: (queryId: string) => void
+}
+
+/**
+ * Pregunta al asistente RAG. El backend embebe la consulta con
+ * nomic-embed-text, recupera contexto de Oracle 23ai y genera con Mistral;
+ * la respuesta llega en streaming SSE (sources → message* → done).
+ */
+export async function streamRagAsk(
+  question: string,
+  sessionId: string,
+  handlers: RagStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  let queryId = ''
+  await streamSSE(
+    '/api/rag/ask',
+    { question, sessionId },
+    (event, data) => {
+      switch (event) {
+        case 'sources': {
+          const d = data as { queryId: string; sources: RagSource[] }
+          queryId = d.queryId
+          handlers.onSources(d.queryId, d.sources ?? [])
+          return true
+        }
+        case 'message':
+          handlers.onToken((data as { content: string }).content ?? '')
+          return true
+        case 'error':
+          throw new Error((data as { error: string }).error || 'model error')
+        case 'done':
+          handlers.onDone?.((data as { queryId?: string }).queryId || queryId)
+          return false
+      }
+      return true
+    },
+    signal,
+  )
+  handlers.onDone?.(queryId)
+}
+
+/**
+ * POST JSON y consume la respuesta como Server-Sent Events. `onEvent`
+ * devuelve false para terminar (evento "done" ya despachado).
+ */
+async function streamSSE(
+  url: string,
+  body: unknown,
+  onEvent: (event: string, data: unknown) => boolean,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
     signal,
   })
 
@@ -83,19 +221,9 @@ export async function streamChat(
     for (const chunk of chunks) {
       const evt = parseEvent(chunk)
       if (!evt) continue
-      switch (evt.event) {
-        case 'message':
-          handlers.onToken((evt.data as { content: string }).content ?? '')
-          break
-        case 'error':
-          throw new Error((evt.data as { error: string }).error || 'model error')
-        case 'done':
-          handlers.onDone?.()
-          return
-      }
+      if (!onEvent(evt.event, evt.data)) return
     }
   }
-  handlers.onDone?.()
 }
 
 function parseEvent(raw: string): { event: string; data: unknown } | null {
