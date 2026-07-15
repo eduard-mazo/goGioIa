@@ -28,6 +28,9 @@ const (
 // maxContextChunkChars recorta cada chunk citado en el prompt.
 const maxContextChunkChars = 2000
 
+// maxAttachChars limita el total de texto adjunto inyectado en el prompt.
+const maxAttachChars = 16000
+
 // Service orquesta ingesta y consultas RAG.
 type Service struct {
 	cfg    config.Config
@@ -200,6 +203,14 @@ func (s *Service) embedBatch(ctx context.Context, inputs []string) ([][]float32,
 
 // ── Consulta (retrieval + prompt) ────────────────────────────────────────
 
+// AttachedDoc es un documento adjuntado a la conversación con el clip (no
+// forma parte de la base de conocimiento) que acompaña la pregunta y se
+// inyecta en el contexto del prompt junto a las fuentes recuperadas.
+type AttachedDoc struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+}
+
 // Prepared contiene todo lo necesario para generar la respuesta en streaming
 // y, al terminar, completar la trazabilidad en rag_queries.
 type Prepared struct {
@@ -211,9 +222,10 @@ type Prepared struct {
 }
 
 // PrepareAsk vectoriza la pregunta, recupera los chunks más afines desde
-// Oracle 23ai, construye el prompt con la plantilla activa y deja registrada
-// la consulta (rag_queries + rag_retrieved_chunks).
-func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, userID string) (*Prepared, error) {
+// Oracle 23ai, construye el prompt con la plantilla activa (incluyendo los
+// documentos adjuntos de la conversación, si los hay) y deja registrada la
+// consulta (rag_queries + rag_retrieved_chunks).
+func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, userID string, attached []AttachedDoc) (*Prepared, error) {
 	if err := s.store.EnsureReady(ctx); err != nil {
 		return nil, err
 	}
@@ -242,7 +254,7 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	if err != nil {
 		return nil, fmt.Errorf("cargar plantilla de prompt: %w", err)
 	}
-	prompt := renderPrompt(templateText, question, sources)
+	prompt := renderPrompt(templateText, question, sources, attached)
 
 	// 4. Trazabilidad: consulta + chunks usados.
 	queryID, err := s.store.CreateQuery(ctx, store.SessionID(sessionID), userID, question, qVec, model, templateID)
@@ -253,12 +265,18 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		log.Printf("rag: no se pudieron registrar los chunks recuperados: %v", err)
 	}
 
+	// Con adjuntos el prompt crece: se amplía la ventana de contexto para que
+	// Ollama no los descarte silenciosamente.
+	numCtx := 8192
+	if len(attached) > 0 {
+		numCtx = 16384
+	}
 	return &Prepared{
 		QueryID:  hex.EncodeToString(queryID),
 		Sources:  sources,
 		Messages: []ollama.Message{{Role: "user", Content: prompt}},
 		Model:    model,
-		Options:  map[string]any{"num_ctx": 8192, "temperature": 0.2},
+		Options:  map[string]any{"num_ctx": numCtx, "temperature": 0.2},
 	}, nil
 }
 
@@ -286,11 +304,13 @@ func (s *Service) Feedback(ctx context.Context, queryIDHex string, rating int, c
 	return s.store.InsertFeedback(ctx, id, rating, comment, createdBy)
 }
 
-// renderPrompt sustituye {context} y {question} en la plantilla.
-func renderPrompt(template, question string, sources []store.SearchResult) string {
+// renderPrompt sustituye {context} y {question} en la plantilla. El contexto
+// reúne los chunks recuperados de Oracle y, a continuación, los documentos
+// adjuntos de la conversación (recortados a un presupuesto total).
+func renderPrompt(template, question string, sources []store.SearchResult, attached []AttachedDoc) string {
 	var b strings.Builder
 	if len(sources) == 0 {
-		b.WriteString("(La base de conocimiento no devolvió resultados para esta pregunta.)")
+		b.WriteString("(La base de conocimiento no devolvió resultados para esta pregunta.)\n\n")
 	}
 	for i, src := range sources {
 		text := src.Text
@@ -302,6 +322,21 @@ func renderPrompt(template, question string, sources []store.SearchResult) strin
 			loc = fmt.Sprintf("%s (pág. %d)", src.FileName, src.PageNumber)
 		}
 		fmt.Fprintf(&b, "[Fuente %d] %s\n%s\n\n", i+1, loc, text)
+	}
+	budget := maxAttachChars
+	for i, doc := range attached {
+		if budget <= 0 {
+			break
+		}
+		text := strings.TrimSpace(doc.Text)
+		if text == "" {
+			continue
+		}
+		if len(text) > budget {
+			text = text[:budget] + "… (recortado)"
+		}
+		budget -= len(text)
+		fmt.Fprintf(&b, "[Adjunto %d] %s\n%s\n\n", i+1, doc.Name, text)
 	}
 	out := strings.ReplaceAll(template, "{context}", strings.TrimSpace(b.String()))
 	out = strings.ReplaceAll(out, "{question}", question)

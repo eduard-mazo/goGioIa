@@ -160,10 +160,12 @@ export function useChat() {
     try {
       if (rag) {
         // Asistente RAG: el backend recupera contexto de Oracle 23ai y
-        // genera con Mistral; la conversación local no se reenvía.
+        // genera con Mistral; la conversación local no se reenvía, pero los
+        // documentos adjuntos con el clip sí viajan como contexto adicional.
         await streamRagAsk(
           trimmed,
           sessionId(),
+          docs.value.map((d) => ({ name: d.filename, text: d.text.slice(0, MAX_DOC_CHARS) })),
           {
             onSources: (queryId, sources) => {
               const target = convMessages.find((m) => m.id === assistantMsg.id)

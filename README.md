@@ -90,7 +90,10 @@ fallido (`FAILED`) se puede reintentar subiendo el mismo archivo de nuevo.
 recupera los `RAG_TOP_K` chunks más afines con
 `VECTOR_DISTANCE(embedding, :q, COSINE)`, construye el prompt con la plantilla
 activa de `prompt_templates` y genera la respuesta con **Mistral** en
-streaming. Cada consulta queda trazada en `rag_queries` +
+streaming. Los documentos adjuntos a la conversación con el clip también
+viajan en la petición (`documents`) y se inyectan en el contexto como
+`[Adjunto N]`, de modo que el modo RAG puede razonar a la vez sobre la base
+de conocimiento y sobre archivos puntuales sin ingerirlos. Cada consulta queda trazada en `rag_queries` +
 `rag_retrieved_chunks`, y los pulgares arriba/abajo de la UI alimentan
 `rag_feedback` para mejorar el sistema.
 

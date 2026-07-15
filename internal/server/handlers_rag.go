@@ -128,12 +128,15 @@ func (s *Server) handleRagDeleteDocument(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// askRequest es la pregunta que envía el frontend al asistente RAG.
+// askRequest es la pregunta que envía el frontend al asistente RAG. Puede
+// incluir los documentos adjuntos a la conversación para usarlos como
+// contexto adicional junto a la base de conocimiento.
 type askRequest struct {
-	Question  string `json:"question"`
-	Model     string `json:"model,omitempty"`
-	SessionID string `json:"sessionId,omitempty"`
-	UserID    string `json:"userId,omitempty"`
+	Question  string            `json:"question"`
+	Model     string            `json:"model,omitempty"`
+	SessionID string            `json:"sessionId,omitempty"`
+	UserID    string            `json:"userId,omitempty"`
+	Documents []rag.AttachedDoc `json:"documents,omitempty"`
 }
 
 // handleRagAsk responde una pregunta con RAG: embebe la consulta, recupera
@@ -157,7 +160,7 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	prep, err := s.rag.PrepareAsk(r.Context(), req.Question, req.Model, req.SessionID, req.UserID)
+	prep, err := s.rag.PrepareAsk(r.Context(), req.Question, req.Model, req.SessionID, req.UserID, req.Documents)
 	if err != nil {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()

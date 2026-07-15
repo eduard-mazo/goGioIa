@@ -185,21 +185,29 @@ interface RagStreamHandlers {
   onDone?: (queryId: string) => void
 }
 
+/** Documento adjunto a la conversación que acompaña una pregunta RAG. */
+export interface RagAttachedDoc {
+  name: string
+  text: string
+}
+
 /**
  * Pregunta al asistente RAG. El backend embebe la consulta con
  * nomic-embed-text, recupera contexto de Oracle 23ai y genera con Mistral;
- * la respuesta llega en streaming SSE (sources → message* → done).
+ * los documentos adjuntos a la conversación se inyectan como contexto
+ * adicional. La respuesta llega en streaming SSE (sources → message* → done).
  */
 export async function streamRagAsk(
   question: string,
   sessionId: string,
+  documents: RagAttachedDoc[],
   handlers: RagStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
   let queryId = ''
   await streamSSE(
     '/api/rag/ask',
-    { question, sessionId },
+    { question, sessionId, documents: documents.length > 0 ? documents : undefined },
     (event, data) => {
       switch (event) {
         case 'sources': {

@@ -51,7 +51,7 @@ export const t = {
   },
   rag: {
     toggle: 'Modo asistente (RAG)',
-    hint: 'Las respuestas se basan en la base de conocimiento (Oracle 23ai). Sube documentos desde «Base de conocimiento».',
+    hint: 'Las respuestas se basan en la base de conocimiento (Oracle 23ai) y en los documentos adjuntos con el clip. Sube documentos permanentes desde «Base de conocimiento».',
     sources: 'Fuentes',
     page: 'pág.',
     kbTitle: 'Base de conocimiento',
