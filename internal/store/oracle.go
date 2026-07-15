@@ -203,12 +203,12 @@ func (s *Store) FindDocumentByHash(ctx context.Context, hash string) (*Document,
 }
 
 // CreateDocument inserta la fila inicial (status UPLOADED) y devuelve su id.
-func (s *Store) CreateDocument(ctx context.Context, fileName, hash string, size int64, uploadedBy string) ([]byte, error) {
+func (s *Store) CreateDocument(ctx context.Context, fileName, hash, mimeType string, size int64, uploadedBy string) ([]byte, error) {
 	id := newID()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO documents (document_id, file_name, file_hash, mime_type, file_size_bytes, status, uploaded_by)
-		VALUES (:1, :2, :3, 'application/pdf', :4, :5, :6)`,
-		id, fileName, hash, size, StatusUploaded, uploadedBy)
+		VALUES (:1, :2, :3, :4, :5, :6, :7)`,
+		id, fileName, hash, mimeType, size, StatusUploaded, uploadedBy)
 	if err != nil {
 		return nil, err
 	}
@@ -302,14 +302,19 @@ func (s *Store) InsertPage(ctx context.Context, docID []byte, pageNumber int, te
 	return err
 }
 
-// InsertChunk guarda un chunk con su embedding (literal → TO_VECTOR).
+// InsertChunk guarda un chunk con su embedding (literal → TO_VECTOR). Un
+// page <= 0 significa «sin página» (archivos de texto) y se guarda como NULL.
 func (s *Store) InsertChunk(ctx context.Context, docID []byte, index, page int, text string, tokenCount int, embedding []float32, model string) error {
+	var pageVal any
+	if page > 0 {
+		pageVal = page
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO document_chunks
 		  (chunk_id, document_id, chunk_index, page_number, chunk_text, token_count,
 		   embedding, embedding_model, embedded_at)
 		VALUES (:1, :2, :3, :4, :5, :6, TO_VECTOR(:7), :8, SYSTIMESTAMP)`,
-		newID(), docID, index, page, clob(text), tokenCount,
+		newID(), docID, index, pageVal, clob(text), tokenCount,
 		vecLiteral(embedding), model)
 	return err
 }

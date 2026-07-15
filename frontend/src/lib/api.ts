@@ -30,7 +30,50 @@ export async function fetchHealth(): Promise<HealthStatus> {
   return res.json()
 }
 
-/** Upload a PDF and return its extracted text. */
+/**
+ * Extensiones admitidas para subir documentos (debe coincidir con la lista
+ * del backend en internal/rag/files.go). Se usa en los `accept` de los input.
+ */
+export const UPLOAD_ACCEPT = [
+  '.pdf',
+  '.txt',
+  '.text',
+  '.log',
+  '.out',
+  '.md',
+  '.markdown',
+  '.rst',
+  '.adoc',
+  '.csv',
+  '.tsv',
+  '.json',
+  '.ndjson',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.conf',
+  '.cfg',
+  '.properties',
+  '.sql',
+  '.sh',
+  '.bat',
+  '.ps1',
+  '.py',
+  '.js',
+  '.ts',
+  '.go',
+  '.java',
+  '.c',
+  '.h',
+  '.cpp',
+  '.html',
+  '.htm',
+  '.css',
+].join(',')
+
+/** Upload a document (PDF or text file) and return its extracted text. */
 export async function uploadPdf(file: File): Promise<PdfResult> {
   const form = new FormData()
   form.append('file', file)

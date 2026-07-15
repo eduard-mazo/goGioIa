@@ -16,7 +16,6 @@ import (
 
 	"goGioIa/internal/config"
 	"goGioIa/internal/ollama"
-	"goGioIa/internal/pdf"
 	"goGioIa/internal/store"
 )
 
@@ -57,6 +56,9 @@ func (e *ErrDuplicate) Error() string {
 // plano; el frontend sigue el avance consultando el estado. Si un intento
 // anterior del mismo archivo quedó en FAILED, se elimina y se reintenta.
 func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte, uploadedBy string) (string, error) {
+	if !SupportedFile(fileName) {
+		return "", fmt.Errorf("tipo de archivo no admitido: %s", SupportedTypesMsg)
+	}
 	if err := s.store.EnsureReady(ctx); err != nil {
 		return "", err
 	}
@@ -80,7 +82,7 @@ func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte,
 		}
 	}
 
-	docID, err := s.store.CreateDocument(ctx, fileName, hash, int64(len(data)), uploadedBy)
+	docID, err := s.store.CreateDocument(ctx, fileName, hash, MimeFor(fileName), int64(len(data)), uploadedBy)
 	if err != nil {
 		return "", fmt.Errorf("registrar documento: %w", err)
 	}
@@ -108,12 +110,13 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		}
 	}
 
-	// 1. Extracción de texto (por página, para citar fuentes).
+	// 1. Extracción de texto (los PDF por página, para citar fuentes; los
+	// archivos de texto como una sola página sin numerar).
 	if err := s.store.SetDocumentStatus(ctx, docID, store.StatusExtracting, ""); err != nil {
 		fail("actualizar estado", err)
 		return
 	}
-	pages, err := pdf.ExtractPages(data)
+	pages, err := extractPages(fileName, data)
 	if err != nil {
 		fail("extracción de texto", err)
 		return
@@ -162,11 +165,16 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 	}
 
 	// 4. Listo: el documento forma parte de la base de conocimiento.
-	if err := s.store.FinishDocument(ctx, docID, len(pages)); err != nil {
+	// pageCount = mayor número de página (0 en archivos de texto sin paginar).
+	pageCount := 0
+	for _, p := range pages {
+		pageCount = max(pageCount, p.Number)
+	}
+	if err := s.store.FinishDocument(ctx, docID, pageCount); err != nil {
 		fail("finalizar documento", err)
 		return
 	}
-	log.Printf("rag: %q ingerido (%d páginas, %d chunks)", fileName, len(pages), len(chunks))
+	log.Printf("rag: %q ingerido (%d páginas, %d chunks)", fileName, pageCount, len(chunks))
 }
 
 // embedBatch vectoriza un lote y, si el lote completo falla pese a los
@@ -289,7 +297,11 @@ func renderPrompt(template, question string, sources []store.SearchResult) strin
 		if len(text) > maxContextChunkChars {
 			text = text[:maxContextChunkChars] + "…"
 		}
-		fmt.Fprintf(&b, "[Fuente %d] %s (pág. %d)\n%s\n\n", i+1, src.FileName, src.PageNumber, text)
+		loc := src.FileName
+		if src.PageNumber > 0 {
+			loc = fmt.Sprintf("%s (pág. %d)", src.FileName, src.PageNumber)
+		}
+		fmt.Fprintf(&b, "[Fuente %d] %s\n%s\n\n", i+1, loc, text)
 	}
 	out := strings.ReplaceAll(template, "{context}", strings.TrimSpace(b.String()))
 	out = strings.ReplaceAll(out, "{question}", question)

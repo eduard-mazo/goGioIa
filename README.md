@@ -8,14 +8,16 @@ with no external assets, CDN calls, or runtime dependencies.
 ## Features
 
 - **Streaming chat** — tokens are streamed from Ollama to the browser over SSE.
-- **RAG assistant (Oracle 23ai)** — upload PDFs to a knowledge base backed by
+- **RAG assistant (Oracle 23ai)** — upload PDFs or plain-text files (.txt,
+  .log, .md, .csv, .json, .yaml, source code…) to a knowledge base backed by
   Oracle 23ai vector search; questions are answered by Mistral grounded in the
   retrieved context, with cited sources and user feedback. See
   [RAG](#rag--asistente-con-base-de-conocimiento-oracle-23ai) below.
 - **Rich Markdown rendering** — headings, tables, lists, blockquotes, and
   syntax-highlighted code blocks with one-click copy.
-- **PDF context** — attach a PDF; text is extracted server-side (pure Go) and
-  injected into the conversation for the model to reason over.
+- **Document context** — attach a PDF or text file; text is extracted
+  server-side (pure Go) and injected into the conversation for the model to
+  reason over.
 - **Gateway-console theme** — professional dark/light palette via CSS variables.
 - **Health indicator** — live status of the configured Ollama endpoint.
 
@@ -50,10 +52,10 @@ goGioIa/
 | GET    | `/api/config`             | Model name and app metadata                      |
 | GET    | `/api/health`             | Ollama reachability                              |
 | POST   | `/api/chat`               | Chat completion, streamed back as SSE            |
-| POST   | `/api/pdf`                | Multipart PDF upload → extracted text (JSON)     |
+| POST   | `/api/pdf`                | Multipart PDF/text upload → extracted text (JSON) |
 | GET    | `/api/rag/health`         | Oracle 23ai status + knowledge-base stats        |
 | GET    | `/api/rag/documents`      | List ingested documents (status, chunks, pages)  |
-| POST   | `/api/rag/documents`      | Upload a PDF → async ingest into the vector store |
+| POST   | `/api/rag/documents`      | Upload a document → async ingest into the vector store |
 | DELETE | `/api/rag/documents/{id}` | Remove a document and its vectors                |
 | POST   | `/api/rag/ask`            | RAG answer, streamed as SSE (sources → tokens)   |
 | POST   | `/api/rag/feedback`       | Rate an answer (-1/0/1) → `rag_feedback`         |
@@ -66,11 +68,15 @@ preguntas usando exclusivamente los documentos subidos a la base de
 conocimiento, citando archivo y página de cada fuente.
 
 **Ingesta / «entrenamiento»** — desde el botón **Base de conocimiento** de la
-cabecera se suben PDFs. Cada subida dispara automáticamente el pipeline:
+cabecera se suben PDF o archivos de texto (.txt, .log, .md, .csv, .json,
+.yaml, .sql, código fuente…; lista completa en `internal/rag/files.go`).
+Cada subida dispara automáticamente el pipeline:
 
-1. `EXTRACTING` — extracción de texto por página (parser puro Go; los PDF
-   escaneados sin capa de texto deben pasar por OCR externo antes de subirse).
-   El texto por página se guarda en `document_pages`.
+1. `EXTRACTING` — los PDF se extraen por página con parser puro Go (los
+   escaneados sin capa de texto deben pasar por OCR externo antes de subirse);
+   los archivos de texto se decodifican como UTF-8 (o Latin-1 como respaldo) y
+   se ingieren sin paginación, por lo que sus citas no llevan «pág.». El texto
+   se guarda en `document_pages`.
 2. `CHUNKED` — troceado (~1800 caracteres con solape de 250, cortando en
    límites de párrafo/frase).
 3. `EMBEDDED` — cada chunk se vectoriza con **nomic-embed-text** (Ollama,

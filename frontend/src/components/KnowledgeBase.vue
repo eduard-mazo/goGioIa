@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Database, FileUp, Loader2, Trash2, TriangleAlert, X } from 'lucide-vue-next'
 import Button from './ui/Button.vue'
 import StatusPill from './StatusPill.vue'
-import { deleteRagDocument, fetchRagHealth, listRagDocuments, uploadRagDocument } from '@/lib/api'
+import { deleteRagDocument, fetchRagHealth, listRagDocuments, UPLOAD_ACCEPT, uploadRagDocument } from '@/lib/api'
 import { t } from '@/i18n'
 import type { RagDocStatus, RagDocument, RagHealth } from '@/types'
 
@@ -174,7 +174,7 @@ function formatDate(iso: string): string {
           <FileUp v-else class="h-6 w-6 text-[color:var(--epm-citrico)]" />
           <span>{{ uploading ? t.rag.uploading : t.rag.dropHere }}</span>
         </button>
-        <input ref="fileInput" type="file" accept="application/pdf,.pdf" multiple class="hidden" @change="onPick" />
+        <input ref="fileInput" type="file" :accept="UPLOAD_ACCEPT" multiple class="hidden" @change="onPick" />
 
         <!-- Tabla de documentos -->
         <div>

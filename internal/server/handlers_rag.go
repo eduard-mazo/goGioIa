@@ -39,8 +39,9 @@ func (s *Server) handleRagHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRagUpload recibe un PDF, lo registra en Oracle y lanza el pipeline de
-// entrenamiento (extracción → chunking → embeddings) en segundo plano.
+// handleRagUpload recibe un documento (PDF o archivo de texto), lo registra
+// en Oracle y lanza el pipeline de entrenamiento (extracción → chunking →
+// embeddings) en segundo plano.
 func (s *Server) handleRagUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
@@ -65,8 +66,8 @@ func (s *Server) handleRagUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no se pudo leer el archivo"})
 		return
 	}
-	if !strings.HasSuffix(strings.ToLower(header.Filename), ".pdf") {
-		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "solo se admiten archivos PDF"})
+	if !rag.SupportedFile(header.Filename) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "tipo de archivo no admitido: " + rag.SupportedTypesMsg})
 		return
 	}
 
@@ -75,7 +76,7 @@ func (s *Server) handleRagUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if dup, ok := errors.AsType[*rag.ErrDuplicate](err); ok {
 			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":    "este PDF ya está en la base de conocimiento",
+				"error":    "este documento ya está en la base de conocimiento",
 				"document": dup.Doc,
 			})
 			return

@@ -13,7 +13,7 @@ export const t = {
     untitled: 'Conversación nueva',
     deleteChat: 'Eliminar conversación',
     docs: 'Documentos',
-    noDocs: 'Adjunta un PDF con el clip para usarlo como contexto.',
+    noDocs: 'Adjunta un PDF o archivo de texto con el clip para usarlo como contexto.',
     chars: 'caracteres',
     model: 'Modelo',
     ollama: 'Ollama',
@@ -38,7 +38,7 @@ export const t = {
     placeholder: 'Escribe un mensaje…',
     stop: 'Detener',
     send: 'Enviar',
-    attach: 'Adjuntar PDF',
+    attach: 'Adjuntar documento (PDF o texto)',
     you: 'Tú',
     offlineTitle: 'Sin conexión con Ollama',
     offlineBody: (host: string) =>
@@ -47,20 +47,20 @@ export const t = {
     error: 'Error',
   },
   doc: {
-    uploadFailed: 'No se pudo procesar el PDF',
+    uploadFailed: 'No se pudo procesar el archivo',
   },
   rag: {
     toggle: 'Modo asistente (RAG)',
-    hint: 'Las respuestas se basan en la base de conocimiento (Oracle 23ai). Sube PDFs desde «Base de conocimiento».',
+    hint: 'Las respuestas se basan en la base de conocimiento (Oracle 23ai). Sube documentos desde «Base de conocimiento».',
     sources: 'Fuentes',
     page: 'pág.',
     kbTitle: 'Base de conocimiento',
     kbSubtitle: 'RAG · ORACLE 23AI',
     kbIntro:
-      'Sube documentos PDF: se extrae el texto, se trocea y se vectoriza con nomic-embed-text. Cada documento entrena al asistente automáticamente.',
-    upload: 'Subir PDF',
+      'Sube PDF o archivos de texto (.txt, .log, .md, .csv, .json…): se extrae el texto, se trocea y se vectoriza con nomic-embed-text. Cada documento entrena al asistente automáticamente.',
+    upload: 'Subir documento',
     uploading: 'Subiendo…',
-    dropHere: 'Arrastra un PDF aquí o haz clic para seleccionarlo',
+    dropHere: 'Arrastra un PDF o archivo de texto aquí, o haz clic para seleccionarlo',
     documents: 'Documentos',
     empty: 'Aún no hay documentos. Sube el primero para entrenar al asistente.',
     columns: {

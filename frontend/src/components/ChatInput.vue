@@ -2,6 +2,7 @@
 import { nextTick, ref } from 'vue'
 import { DatabaseZap, Loader2, Paperclip, Send, Square } from 'lucide-vue-next'
 import Button from './ui/Button.vue'
+import { UPLOAD_ACCEPT } from '@/lib/api'
 import { t } from '@/i18n'
 
 const props = defineProps<{
@@ -61,7 +62,7 @@ function onFile(e: Event) {
       <input
         ref="fileInput"
         type="file"
-        accept="application/pdf,.pdf"
+        :accept="UPLOAD_ACCEPT"
         class="hidden"
         @change="onFile"
       />

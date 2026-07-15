@@ -9,7 +9,7 @@ import (
 	"net/http"
 
 	"goGioIa/internal/ollama"
-	"goGioIa/internal/pdf"
+	"goGioIa/internal/rag"
 )
 
 // maxUploadBytes caps the size of an uploaded PDF (32 MiB).
@@ -129,7 +129,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePDF accepts a multipart PDF upload and returns its extracted text.
+// handlePDF accepts a multipart upload (PDF or plain-text file) and returns
+// its extracted text so the chat can use it as context.
 //
 // The upload is handled entirely in memory: the request body is capped by
 // MaxBytesReader and ParseMultipartForm is given the same value as maxMemory,
@@ -161,8 +162,12 @@ func (s *Server) handlePDF(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no se pudo leer el archivo"})
 		return
 	}
+	if !rag.SupportedFile(header.Filename) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "tipo de archivo no admitido: " + rag.SupportedTypesMsg})
+		return
+	}
 
-	text, err := pdf.ExtractText(data)
+	text, err := rag.ExtractText(header.Filename, data)
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return

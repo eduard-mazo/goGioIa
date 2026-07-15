@@ -73,7 +73,7 @@ const showRagMeta = computed(
             <FileText class="h-3 w-3 shrink-0 text-[color:var(--epm-citrico)]" />
             <span class="truncate font-medium">[{{ i + 1 }}] {{ src.fileName }}</span>
             <span class="shrink-0 font-mono text-[10px] text-muted-foreground">
-              {{ t.rag.page }} {{ src.page }} · {{ (src.score * 100).toFixed(0) }}%
+              <template v-if="src.page > 0">{{ t.rag.page }} {{ src.page }} · </template>{{ (src.score * 100).toFixed(0) }}%
             </span>
           </li>
         </ul>
