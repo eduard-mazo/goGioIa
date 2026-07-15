@@ -156,6 +156,15 @@ export async function uploadRagDocument(file: File): Promise<{ id: string; fileN
   return data as { id: string; fileName: string }
 }
 
+/** Reencola la ingesta de un documento fallido. */
+export async function retryRagDocument(id: string): Promise<void> {
+  const res = await fetch(`/api/rag/documents/${id}/retry`, { method: 'POST' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || `retry failed (${res.status})`)
+  }
+}
+
 /** Elimina un documento (y sus chunks) del vector store. */
 export async function deleteRagDocument(id: string): Promise<void> {
   const res = await fetch(`/api/rag/documents/${id}`, { method: 'DELETE' })

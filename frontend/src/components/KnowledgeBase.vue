@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Database, FileUp, Loader2, Trash2, TriangleAlert, X } from 'lucide-vue-next'
+import { Database, FileUp, Loader2, RotateCcw, Trash2, TriangleAlert, X } from 'lucide-vue-next'
 import Button from './ui/Button.vue'
 import StatusPill from './StatusPill.vue'
-import { deleteRagDocument, fetchRagHealth, listRagDocuments, UPLOAD_ACCEPT, uploadRagDocument } from '@/lib/api'
+import { deleteRagDocument, fetchRagHealth, listRagDocuments, retryRagDocument, UPLOAD_ACCEPT, uploadRagDocument } from '@/lib/api'
 import { t } from '@/i18n'
 import type { RagDocStatus, RagDocument, RagHealth } from '@/types'
 
@@ -76,6 +76,16 @@ function onPick(e: Event) {
 function onDrop(e: DragEvent) {
   dragOver.value = false
   void onFiles(e.dataTransfer?.files ?? null)
+}
+
+async function onRetry(doc: RagDocument) {
+  error.value = null
+  try {
+    await retryRagDocument(doc.id)
+    await refresh()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
 }
 
 async function onDelete(doc: RagDocument) {
@@ -227,7 +237,17 @@ function formatDate(iso: string): string {
                   <td class="whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground">
                     {{ formatDate(doc.uploadedAt) }}
                   </td>
-                  <td class="px-3 py-2 text-right">
+                  <td class="whitespace-nowrap px-3 py-2 text-right">
+                    <Button
+                      v-if="doc.status === 'FAILED'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-8 w-8 text-muted-foreground hover:text-[color:var(--epm-citrico)]"
+                      :title="t.rag.retry"
+                      @click="onRetry(doc)"
+                    >
+                      <RotateCcw />
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"

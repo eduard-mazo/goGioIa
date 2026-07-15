@@ -80,6 +80,7 @@ export const t = {
       FAILED: 'Error',
     } as Record<string, string>,
     delete: 'Eliminar documento',
+    retry: 'Reintentar ingesta',
     confirmDelete: '¿Eliminar este documento y sus vectores de la base de conocimiento?',
     oracle: 'Oracle 23ai',
     stats: (docs: number, chunks: number) => `${docs} documentos · ${chunks} chunks vectorizados`,

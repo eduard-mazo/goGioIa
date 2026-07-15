@@ -22,20 +22,26 @@ import (
 func (s *Server) handleRagHealth(w http.ResponseWriter, r *http.Request) {
 	status := "online"
 	var detail string
-	docs, chunks := 0, 0
+	docs, chunks, pending := 0, 0, 0
 	if err := s.store.EnsureReady(r.Context()); err != nil {
 		status = "offline"
 		detail = err.Error()
-	} else if d, c, err := s.store.Stats(r.Context()); err == nil {
-		docs, chunks = d, c
+	} else {
+		if d, c, err := s.store.Stats(r.Context()); err == nil {
+			docs, chunks = d, c
+		}
+		if p, err := s.store.PendingJobs(r.Context()); err == nil {
+			pending = p
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"oracle":     status,
-		"detail":     detail,
-		"documents":  docs,
-		"chunks":     chunks,
-		"embedModel": s.cfg.EmbedModel,
-		"ragModel":   s.cfg.RAGModel,
+		"oracle":      status,
+		"detail":      detail,
+		"documents":   docs,
+		"chunks":      chunks,
+		"pendingJobs": pending,
+		"embedModel":  s.cfg.EmbedModel,
+		"ragModel":    s.cfg.RAGModel,
 	})
 }
 
@@ -126,6 +132,23 @@ func (s *Server) handleRagDeleteDocument(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleRagRetryDocument reencola la ingesta de un documento FAILED (el
+// archivo original sigue en document_files hasta que la ingesta complete).
+func (s *Server) handleRagRetryDocument(w http.ResponseWriter, r *http.Request) {
+	if err := s.rag.RetryDocument(r.Context(), r.PathValue("id")); err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "documento no encontrado"})
+		case errors.Is(err, store.ErrNoSourceFile):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
 // askRequest es la pregunta que envía el frontend al asistente RAG. Puede

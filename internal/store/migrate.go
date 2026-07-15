@@ -71,6 +71,36 @@ var migrations = []migration{
 			   UNIQUE (query_id, created_by)`,
 		},
 	},
+	{
+		version:     3,
+		description: "cola durable de trabajos (processing_jobs) y archivos en proceso (document_files)",
+		statements: []string{
+			`CREATE TABLE processing_jobs (
+			    job_id      RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+			    job_type    VARCHAR2(30) NOT NULL,
+			    payload_id  RAW(16) NOT NULL,
+			    status      VARCHAR2(20) DEFAULT 'QUEUED' NOT NULL,
+			    attempts    NUMBER DEFAULT 0 NOT NULL,
+			    last_error  VARCHAR2(4000 CHAR),
+			    created_at  TIMESTAMP DEFAULT SYSTIMESTAMP,
+			    started_at  TIMESTAMP,
+			    finished_at TIMESTAMP,
+			    CONSTRAINT ck_job_type CHECK (job_type IN
+			      ('ingest_document','embed_attachment','summarize_conversation','purge_history')),
+			    CONSTRAINT ck_job_status CHECK (status IN ('QUEUED','RUNNING','DONE','FAILED'))
+			)`,
+			`CREATE INDEX idx_jobs_pending ON processing_jobs(status, created_at)`,
+			`CREATE INDEX idx_jobs_payload ON processing_jobs(payload_id)`,
+			// El archivo original vive aquí mientras se procesa: permite
+			// reanudar la ingesta tras un reinicio y reintentar fallos sin
+			// volver a subirlo. Se borra al completar la ingesta.
+			`CREATE TABLE document_files (
+			    document_id RAW(16) PRIMARY KEY
+			                REFERENCES documents(document_id) ON DELETE CASCADE,
+			    content     BLOB NOT NULL
+			)`,
+		},
+	},
 }
 
 // tolerableORA son los errores «ya existe / ya aplicado». El DDL de Oracle

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,20 +41,58 @@ type ChatChunk struct {
 type Client struct {
 	endpoint string
 	http     *http.Client
+	// sem limita las generaciones simultáneas: el host Ollama es modesto y
+	// demasiados chats concurrentes degradan o tumban el runner. nil = sin
+	// límite.
+	sem chan struct{}
 }
 
 // New returns a Client for the given fully-qualified chat endpoint URL.
-func New(endpoint string) *Client {
+// maxConcurrent > 0 caps simultaneous generation (Stream) calls.
+func New(endpoint string, maxConcurrent int) *Client {
+	var sem chan struct{}
+	if maxConcurrent > 0 {
+		sem = make(chan struct{}, maxConcurrent)
+	}
 	return &Client{
 		endpoint: endpoint,
 		// No overall timeout: chat responses stream and may run for a while.
 		http: &http.Client{},
+		sem:  sem,
 	}
+}
+
+// acquire toma un hueco del semáforo (o espera). Devuelve la función que lo
+// libera, segura frente a llamadas repetidas.
+func (c *Client) acquire(ctx context.Context) (release func(), err error) {
+	if c.sem == nil {
+		return func() {}, nil
+	}
+	select {
+	case c.sem <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-c.sem }) }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// releaseCloser libera el semáforo cuando el consumidor cierra el stream.
+type releaseCloser struct {
+	io.ReadCloser
+	release func()
+}
+
+func (r releaseCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.release()
+	return err
 }
 
 // Stream POSTs a chat request and returns the raw NDJSON response body.
 // options (optional) carries model params like num_ctx and temperature. The
-// caller is responsible for closing the returned reader.
+// caller is responsible for closing the returned reader (which also frees the
+// concurrency slot).
 func (c *Client) Stream(ctx context.Context, model string, msgs []Message, options map[string]any) (io.ReadCloser, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:    model,
@@ -65,22 +104,30 @@ func (c *Client) Stream(ctx context.Context, model string, msgs []Message, optio
 		return nil, err
 	}
 
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
+		release()
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("cannot reach Ollama at %s: %w", c.endpoint, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
+		release()
 		return nil, fmt.Errorf("ollama returned %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
 	}
-	return resp.Body, nil
+	return releaseCloser{ReadCloser: resp.Body, release: release}, nil
 }
 
 // Ping performs a lightweight reachability check against the Ollama host root.

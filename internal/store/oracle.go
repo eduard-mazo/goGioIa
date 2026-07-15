@@ -193,14 +193,35 @@ func (s *Store) FindDocumentByHash(ctx context.Context, hash string) (*Document,
 	return &d, nil
 }
 
-// CreateDocument inserta la fila inicial (status UPLOADED) y devuelve su id.
-func (s *Store) CreateDocument(ctx context.Context, fileName, hash, mimeType string, size int64, uploadedBy string) ([]byte, error) {
+// CreateDocument registra el documento (status UPLOADED), guarda su archivo
+// original y encola la ingesta, todo en una transacción: o queda completo en
+// la cola o no queda nada.
+func (s *Store) CreateDocument(ctx context.Context, fileName, hash, mimeType string, uploadedBy string, data []byte) ([]byte, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	id := newID()
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO documents (document_id, file_name, file_hash, mime_type, file_size_bytes, status, uploaded_by)
 		VALUES (:1, :2, :3, :4, :5, :6, :7)`,
-		id, fileName, hash, mimeType, size, StatusUploaded, uploadedBy)
-	if err != nil {
+		id, fileName, hash, mimeType, int64(len(data)), StatusUploaded, uploadedBy); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO document_files (document_id, content) VALUES (:1, :2)`,
+		id, go_ora.Blob{Data: data}); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO processing_jobs (job_id, job_type, payload_id)
+		VALUES (:1, :2, :3)`,
+		newID(), JobIngestDocument, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return id, nil
@@ -272,6 +293,11 @@ func (s *Store) DeleteDocument(ctx context.Context, id []byte) error {
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM rag_retrieved_chunks
 		WHERE chunk_id IN (SELECT chunk_id FROM document_chunks WHERE document_id = :1)`, id); err != nil {
+		return err
+	}
+	// Trabajos aún no iniciados para este documento: fuera de la cola.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM processing_jobs WHERE payload_id = :1 AND status = 'QUEUED'`, id); err != nil {
 		return err
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE document_id = :1`, id)

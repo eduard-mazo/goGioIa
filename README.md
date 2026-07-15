@@ -57,6 +57,7 @@ goGioIa/
 | GET    | `/api/rag/documents`      | List ingested documents (status, chunks, pages)  |
 | POST   | `/api/rag/documents`      | Upload a document → async ingest into the vector store |
 | DELETE | `/api/rag/documents/{id}` | Remove a document and its vectors                |
+| POST   | `/api/rag/documents/{id}/retry` | Re-queue ingestion of a FAILED document    |
 | POST   | `/api/rag/ask`            | RAG answer, streamed as SSE (sources → tokens)   |
 | POST   | `/api/rag/feedback`       | Rate an answer (-1/0/1) → `rag_feedback`         |
 | GET    | `/*`                      | Embedded SPA (with client-side route fallback)   |
@@ -83,8 +84,14 @@ Cada subida dispara automáticamente el pipeline:
    768 dims, prefijo `search_document:`) y se inserta en
    `document_chunks.embedding` (`VECTOR(768, FLOAT32)`).
 
-Los duplicados se detectan por SHA-256 (`uq_documents_hash`); un intento
-fallido (`FAILED`) se puede reintentar subiendo el mismo archivo de nuevo.
+La ingesta corre en una **cola durable**: cada subida guarda el archivo en
+`document_files` y encola un trabajo en `processing_jobs`, que consumen
+`RAG_WORKERS` workers (así se acota la carga de embeddings sobre Ollama y un
+reinicio del servidor reanuda lo pendiente automáticamente). Los duplicados
+se detectan por SHA-256 (`uq_documents_hash`); un intento fallido (`FAILED`)
+se reintenta con el botón de la UI (o `POST /api/rag/documents/{id}/retry`)
+o subiendo el archivo de nuevo. Las generaciones de chat simultáneas hacia
+Ollama se limitan con `OLLAMA_MAX_CONCURRENT`.
 
 **Consulta** — `/api/rag/ask` vectoriza la pregunta (`search_query:`),
 recupera los `RAG_TOP_K` chunks más afines con
@@ -119,6 +126,9 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `RAG_CHUNK_SIZE`    | `1800`                              | Chunk size (characters)              |
 | `RAG_CHUNK_OVERLAP` | `250`                               | Chunk overlap (characters)           |
 | `RAG_EMBED_BATCH`   | `8`                                 | Chunks per `/api/embed` call         |
+| `RAG_WORKERS`       | `2`                                 | Ingest queue workers                 |
+| `OLLAMA_MAX_CONCURRENT` | `2`                             | Max simultaneous chat generations    |
+| `RAG_HISTORY_RETENTION_DAYS` | `180`                      | Purge `rag_queries` older than this (0 = keep) |
 | `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
 | `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
 | `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |

@@ -38,7 +38,7 @@ func New(cfg config.Config) *Server {
 	if err != nil {
 		log.Printf("warning: embedded index.html missing (did you build the frontend?): %v", err)
 	}
-	ol := ollama.New(cfg.OllamaAPI)
+	ol := ollama.New(cfg.OllamaAPI, cfg.OllamaMaxConcurrent)
 	st, err := store.Open(cfg)
 	if err != nil {
 		log.Fatalf("open Oracle vector store: %v", err)
@@ -52,11 +52,14 @@ func New(cfg config.Config) *Server {
 			log.Printf("aviso: oracle no disponible aún: %v", err)
 		}
 	}()
+	ragSvc := rag.New(cfg, st, ol)
+	// Cola de ingesta: reanuda trabajos interrumpidos y procesa las subidas.
+	ragSvc.Start(context.Background())
 	return &Server{
 		cfg:    cfg,
 		ollama: ol,
 		store:  st,
-		rag:    rag.New(cfg, st, ol),
+		rag:    ragSvc,
 		dist:   dist,
 		index:  index,
 	}
@@ -77,6 +80,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/rag/documents", s.handleRagDocuments)
 	mux.HandleFunc("POST /api/rag/documents", s.handleRagUpload)
 	mux.HandleFunc("DELETE /api/rag/documents/{id}", s.handleRagDeleteDocument)
+	mux.HandleFunc("POST /api/rag/documents/{id}/retry", s.handleRagRetryDocument)
 	mux.HandleFunc("POST /api/rag/ask", s.handleRagAsk)
 	mux.HandleFunc("POST /api/rag/feedback", s.handleRagFeedback)
 

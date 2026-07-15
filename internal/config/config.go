@@ -29,6 +29,12 @@ type Config struct {
 	// EmbedBatch is how many chunks are vectorised per Ollama /api/embed call.
 	// Lower it if the Ollama host resets connections under sustained load.
 	EmbedBatch int
+	// RAGWorkers is how many queue workers process ingest jobs concurrently.
+	RAGWorkers int
+	// OllamaMaxConcurrent caps simultaneous generation (chat) calls to Ollama.
+	OllamaMaxConcurrent int
+	// HistoryRetentionDays purges rag_queries older than this (0 disables).
+	HistoryRetentionDays int
 
 	// ── Oracle 23ai (vector store) ─────────────────────────────────────────
 	OracleUser     string
@@ -46,12 +52,15 @@ const (
 	// e.g. "llama3.1:latest", "mistral:latest", "qwen2.5:7b".
 	defaultModelName = "llama3.1:latest"
 
-	defaultEmbedModel   = "nomic-embed-text" // 768 dimensiones
-	defaultRAGModel     = "mistral:latest"
-	defaultRAGTopK      = 5
-	defaultChunkSize    = 1800 // ~450 tokens por chunk
-	defaultChunkOverlap = 250
-	defaultEmbedBatch   = 8
+	defaultEmbedModel           = "nomic-embed-text" // 768 dimensiones
+	defaultRAGModel             = "mistral:latest"
+	defaultRAGTopK              = 5
+	defaultChunkSize            = 1800 // ~450 tokens por chunk
+	defaultChunkOverlap         = 250
+	defaultEmbedBatch           = 8
+	defaultRAGWorkers           = 2
+	defaultOllamaMaxConcurrent  = 2
+	defaultHistoryRetentionDays = 180
 
 	defaultOracleUser     = ""
 	defaultOraclePassword = ""
@@ -73,6 +82,10 @@ func Load() Config {
 		ChunkSize:    envInt("RAG_CHUNK_SIZE", defaultChunkSize),
 		ChunkOverlap: envInt("RAG_CHUNK_OVERLAP", defaultChunkOverlap),
 		EmbedBatch:   envInt("RAG_EMBED_BATCH", defaultEmbedBatch),
+		RAGWorkers:   envInt("RAG_WORKERS", defaultRAGWorkers),
+
+		OllamaMaxConcurrent:  envInt("OLLAMA_MAX_CONCURRENT", defaultOllamaMaxConcurrent),
+		HistoryRetentionDays: envIntAllowZero("RAG_HISTORY_RETENTION_DAYS", defaultHistoryRetentionDays),
 
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),
@@ -92,6 +105,16 @@ func env(key, fallback string) string {
 func envInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return fallback
+}
+
+// envIntAllowZero admite 0 como valor válido (p.ej. «desactivado»).
+func envIntAllowZero(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
 		}
 	}

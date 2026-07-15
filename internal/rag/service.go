@@ -36,11 +36,14 @@ type Service struct {
 	cfg    config.Config
 	store  *store.Store
 	ollama *ollama.Client
+	// wake despierta a los workers de la cola cuando entra trabajo nuevo
+	// (buffered: si nadie escucha, el sondeo periódico lo recoge igual).
+	wake chan struct{}
 }
 
-// New construye el servicio RAG.
+// New construye el servicio RAG. Llamar a Start para arrancar los workers.
 func New(cfg config.Config, st *store.Store, ol *ollama.Client) *Service {
-	return &Service{cfg: cfg, store: st, ollama: ol}
+	return &Service{cfg: cfg, store: st, ollama: ol, wake: make(chan struct{}, 1)}
 }
 
 // Store expone el vector store (listar/eliminar documentos desde la API).
@@ -55,9 +58,11 @@ func (e *ErrDuplicate) Error() string {
 	return fmt.Sprintf("el documento ya existe (%s, estado %s)", e.Doc.FileName, e.Doc.Status)
 }
 
-// IngestAsync registra el documento y lanza el procesamiento en segundo
-// plano; el frontend sigue el avance consultando el estado. Si un intento
-// anterior del mismo archivo quedó en FAILED, se elimina y se reintenta.
+// IngestAsync registra el documento y lo encola: los workers (Start) lo
+// procesan en segundo plano y el frontend sigue el avance consultando el
+// estado. El archivo queda en document_files hasta completar la ingesta, así
+// que un reinicio del servidor no la pierde. Si un intento anterior del mismo
+// archivo quedó en FAILED, se elimina y se reintenta.
 func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte, uploadedBy string) (string, error) {
 	if !SupportedFile(fileName) {
 		return "", fmt.Errorf("tipo de archivo no admitido: %s", SupportedTypesMsg)
@@ -85,24 +90,33 @@ func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte,
 		}
 	}
 
-	docID, err := s.store.CreateDocument(ctx, fileName, hash, MimeFor(fileName), int64(len(data)), uploadedBy)
+	docID, err := s.store.CreateDocument(ctx, fileName, hash, MimeFor(fileName), uploadedBy, data)
 	if err != nil {
 		return "", fmt.Errorf("registrar documento: %w", err)
 	}
 
-	go s.process(docID, fileName, data)
+	s.wakeWorkers()
 
 	return hex.EncodeToString(docID), nil
 }
 
-// process ejecuta el pipeline completo sobre un documento ya registrado:
-// UPLOADED → EXTRACTING → CHUNKED → EMBEDDED (o FAILED con el motivo).
-func (s *Service) process(docID []byte, fileName string, data []byte) {
+// wakeWorkers avisa a la cola sin bloquear (el sondeo periódico es la red).
+func (s *Service) wakeWorkers() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// runIngest ejecuta el pipeline completo sobre un documento ya registrado:
+// UPLOADED → EXTRACTING → CHUNKED → EMBEDDED (o FAILED con el motivo, que
+// también se devuelve para registrarlo en el trabajo de la cola).
+func (s *Service) runIngest(docID []byte, fileName string, data []byte) error {
 	// Independiente de la petición HTTP: la ingesta sobrevive al upload.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	fail := func(stage string, err error) {
+	fail := func(stage string, err error) error {
 		log.Printf("rag: ingesta de %q falló en %s: %v", fileName, stage, err)
 		msg := fmt.Sprintf("%s: %v", stage, err)
 		if len(msg) > 3900 {
@@ -111,38 +125,40 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		if err := s.store.SetDocumentStatus(ctx, docID, store.StatusFailed, msg); err != nil {
 			log.Printf("rag: no se pudo marcar FAILED: %v", err)
 		}
+		return fmt.Errorf("%s: %w", stage, err)
+	}
+
+	// 0. Reintentos: descartar restos de un intento anterior (páginas/chunks
+	// parciales violarían las restricciones de unicidad).
+	if err := s.store.ResetDocumentContent(ctx, docID); err != nil {
+		return fail("limpiar contenido previo", err)
 	}
 
 	// 1. Extracción de texto (los PDF por página, para citar fuentes; los
 	// archivos de texto como una sola página sin numerar).
 	if err := s.store.SetDocumentStatus(ctx, docID, store.StatusExtracting, ""); err != nil {
-		fail("actualizar estado", err)
-		return
+		return fail("actualizar estado", err)
 	}
 	pages, err := extractPages(fileName, data)
 	if err != nil {
-		fail("extracción de texto", err)
-		return
+		return fail("extracción de texto", err)
 	}
 	for _, p := range pages {
 		if p.Text == "" {
 			continue
 		}
 		if err := s.store.InsertPage(ctx, docID, p.Number, p.Text); err != nil {
-			fail("guardar páginas", err)
-			return
+			return fail("guardar páginas", err)
 		}
 	}
 
 	// 2. Chunking.
 	chunks := chunkPages(pages, s.cfg.ChunkSize, s.cfg.ChunkOverlap)
 	if len(chunks) == 0 {
-		fail("chunking", fmt.Errorf("el documento no produjo fragmentos de texto"))
-		return
+		return fail("chunking", fmt.Errorf("el documento no produjo fragmentos de texto"))
 	}
 	if err := s.store.SetDocumentStatus(ctx, docID, store.StatusChunked, ""); err != nil {
-		fail("actualizar estado", err)
-		return
+		return fail("actualizar estado", err)
 	}
 
 	// 3. Embeddings por lotes + inserción en el vector store.
@@ -155,14 +171,12 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		}
 		vectors, err := s.embedBatch(ctx, inputs)
 		if err != nil {
-			fail("embeddings", fmt.Errorf("chunks %d-%d de %d: %w", from+1, from+len(batch), len(chunks), err))
-			return
+			return fail("embeddings", fmt.Errorf("chunks %d-%d de %d: %w", from+1, from+len(batch), len(chunks), err))
 		}
 		for i, c := range batch {
 			if err := s.store.InsertChunk(ctx, docID, c.Index, c.Page, c.Text,
 				estimateTokens(c.Text), vectors[i], s.cfg.EmbedModel); err != nil {
-				fail("guardar chunks", err)
-				return
+				return fail("guardar chunks", err)
 			}
 		}
 	}
@@ -174,10 +188,10 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		pageCount = max(pageCount, p.Number)
 	}
 	if err := s.store.FinishDocument(ctx, docID, pageCount); err != nil {
-		fail("finalizar documento", err)
-		return
+		return fail("finalizar documento", err)
 	}
 	log.Printf("rag: %q ingerido (%d páginas, %d chunks)", fileName, pageCount, len(chunks))
+	return nil
 }
 
 // embedBatch vectoriza un lote y, si el lote completo falla pese a los

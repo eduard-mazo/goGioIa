@@ -146,3 +146,28 @@ ALTER TABLE rag_feedback MODIFY (feedback_text VARCHAR2(2000 CHAR));
 -- Una valoración por usuario y respuesta (el código usa MERGE):
 ALTER TABLE rag_feedback ADD CONSTRAINT uq_feedback_query_user
   UNIQUE (query_id, created_by);
+
+-- ── Migración 3: cola durable de ingesta ───────────────────────────────────
+
+CREATE TABLE processing_jobs (
+    job_id      RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    job_type    VARCHAR2(30) NOT NULL,
+    payload_id  RAW(16) NOT NULL,
+    status      VARCHAR2(20) DEFAULT 'QUEUED' NOT NULL,
+    attempts    NUMBER DEFAULT 0 NOT NULL,
+    last_error  VARCHAR2(4000 CHAR),
+    created_at  TIMESTAMP DEFAULT SYSTIMESTAMP,
+    started_at  TIMESTAMP,
+    finished_at TIMESTAMP,
+    CONSTRAINT ck_job_type CHECK (job_type IN
+      ('ingest_document','embed_attachment','summarize_conversation','purge_history')),
+    CONSTRAINT ck_job_status CHECK (status IN ('QUEUED','RUNNING','DONE','FAILED'))
+);
+CREATE INDEX idx_jobs_pending ON processing_jobs(status, created_at);
+CREATE INDEX idx_jobs_payload ON processing_jobs(payload_id);
+
+-- Archivo original mientras se procesa (se borra al completar la ingesta):
+CREATE TABLE document_files (
+    document_id RAW(16) PRIMARY KEY REFERENCES documents(document_id) ON DELETE CASCADE,
+    content     BLOB NOT NULL
+);
