@@ -20,11 +20,10 @@ type Message struct {
 
 // chatRequest is the payload sent to Ollama's /api/chat endpoint.
 type chatRequest struct {
-	Model    string          `json:"model"`
-	Messages []Message       `json:"messages"`
-	Stream   bool            `json:"stream"`
-	Format   json.RawMessage `json:"format,omitempty"`  // "json" or a JSON schema
-	Options  map[string]any  `json:"options,omitempty"` // e.g. num_ctx, temperature
+	Model    string         `json:"model"`
+	Messages []Message      `json:"messages"`
+	Stream   bool           `json:"stream"`
+	Options  map[string]any `json:"options,omitempty"` // e.g. num_ctx, temperature
 }
 
 // ChatChunk is one NDJSON line emitted by Ollama while streaming.
@@ -53,15 +52,13 @@ func New(endpoint string) *Client {
 }
 
 // Stream POSTs a chat request and returns the raw NDJSON response body.
-// format (optional) constrains the output ("json" or a JSON schema); options
-// (optional) carries model params like num_ctx and temperature. The caller is
-// responsible for closing the returned reader.
-func (c *Client) Stream(ctx context.Context, model string, msgs []Message, format json.RawMessage, options map[string]any) (io.ReadCloser, error) {
+// options (optional) carries model params like num_ctx and temperature. The
+// caller is responsible for closing the returned reader.
+func (c *Client) Stream(ctx context.Context, model string, msgs []Message, options map[string]any) (io.ReadCloser, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:    model,
 		Messages: msgs,
 		Stream:   true,
-		Format:   format,
 		Options:  options,
 	})
 	if err != nil {

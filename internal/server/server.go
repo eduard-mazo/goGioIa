@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"io/fs"
 	"log"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 
 	"goGioIa/internal/config"
 	"goGioIa/internal/ollama"
+	"goGioIa/internal/rag"
+	"goGioIa/internal/store"
 	"goGioIa/web"
 )
 
@@ -19,6 +22,8 @@ import (
 type Server struct {
 	cfg    config.Config
 	ollama *ollama.Client
+	store  *store.Store
+	rag    *rag.Service
 	dist   fs.FS
 	index  []byte
 }
@@ -33,9 +38,25 @@ func New(cfg config.Config) *Server {
 	if err != nil {
 		log.Printf("warning: embedded index.html missing (did you build the frontend?): %v", err)
 	}
+	ol := ollama.New(cfg.OllamaAPI)
+	st, err := store.Open(cfg)
+	if err != nil {
+		log.Fatalf("open Oracle vector store: %v", err)
+	}
+	// Bootstrap del esquema en segundo plano: si Oracle está caído en el
+	// arranque, cada petición RAG lo reintenta vía EnsureReady.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := st.EnsureReady(ctx); err != nil {
+			log.Printf("aviso: oracle no disponible aún: %v", err)
+		}
+	}()
 	return &Server{
 		cfg:    cfg,
-		ollama: ollama.New(cfg.OllamaAPI),
+		ollama: ol,
+		store:  st,
+		rag:    rag.New(cfg, st, ol),
 		dist:   dist,
 		index:  index,
 	}
@@ -50,6 +71,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/models", s.handleModels)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
 	mux.HandleFunc("POST /api/pdf", s.handlePDF)
+
+	// RAG: base de conocimiento en Oracle 23ai + asistente con retrieval.
+	mux.HandleFunc("GET /api/rag/health", s.handleRagHealth)
+	mux.HandleFunc("GET /api/rag/documents", s.handleRagDocuments)
+	mux.HandleFunc("POST /api/rag/documents", s.handleRagUpload)
+	mux.HandleFunc("DELETE /api/rag/documents/{id}", s.handleRagDeleteDocument)
+	mux.HandleFunc("POST /api/rag/ask", s.handleRagAsk)
+	mux.HandleFunc("POST /api/rag/feedback", s.handleRagFeedback)
 
 	// Everything else is the SPA (static assets + client-side routes).
 	mux.Handle("/", s.staticHandler())

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Bot, Menu, WifiOff } from 'lucide-vue-next'
+import { Bot, Database, Menu, WifiOff } from 'lucide-vue-next'
 import Sidebar from './components/Sidebar.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import ChatInput from './components/ChatInput.vue'
 import StatusPill from './components/StatusPill.vue'
 import ModelSelect from './components/ModelSelect.vue'
+import KnowledgeBase from './components/KnowledgeBase.vue'
 import { useChat } from './composables/useChat'
 import { fetchConfig, fetchHealth, fetchModels, uploadPdf } from './lib/api'
 import { uid } from './lib/utils'
@@ -20,10 +21,11 @@ const {
   isStreaming,
   isEmpty,
   setModel,
-  contractMode,
-  setContractMode,
+  ragMode,
+  setRagMode,
   send,
   stop,
+  rateMessage,
   newConversation,
   selectConversation,
   deleteConversation,
@@ -41,6 +43,7 @@ const uploadError = ref<string | null>(null)
 const dark = ref(true)
 const collapsed = ref(false)
 const mobileOpen = ref(false)
+const showKnowledge = ref(false)
 const scrollEl = ref<HTMLElement | null>(null)
 
 const isOffline = computed(() => health.value?.ollama === 'offline')
@@ -74,7 +77,18 @@ onMounted(async () => {
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') mobileOpen.value = false
+  if (e.key === 'Escape') {
+    mobileOpen.value = false
+    showKnowledge.value = false
+  }
+}
+
+async function onFeedback(messageId: string, rating: number) {
+  try {
+    await rateMessage(messageId, rating)
+  } catch {
+    /* feedback es best-effort: no interrumpe la conversación */
+  }
 }
 
 async function refreshHealth() {
@@ -173,8 +187,8 @@ watch(
   () => messages.value.reduce((n, m) => n + m.content.length, 0),
   scrollToBottom,
 )
-// When a reply finishes, its rendered height can jump (e.g. the contract
-// report replaces the streamed JSON), so re-anchor to the bottom.
+// When a reply finishes, its rendered height can jump (e.g. the RAG sources
+// and feedback controls appear), so re-anchor to the bottom.
 watch(isStreaming, (streaming) => {
   if (!streaming) scrollToBottom()
 })
@@ -228,6 +242,14 @@ watch(isStreaming, (streaming) => {
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-2 sm:gap-3">
+          <button
+            class="inline-flex h-9 items-center gap-2 rounded-sm border border-border px-3 text-xs font-semibold transition hover:bg-muted"
+            :title="t.rag.open"
+            @click="showKnowledge = true"
+          >
+            <Database class="h-4 w-4 text-[color:var(--epm-citrico)]" />
+            <span class="hidden lg:inline">{{ t.rag.open }}</span>
+          </button>
           <ModelSelect
             :models="models"
             :selected="selectedModel"
@@ -262,7 +284,7 @@ watch(isStreaming, (streaming) => {
 
         <!-- Conversación -->
         <div v-else class="mx-auto max-w-3xl">
-          <ChatMessage v-for="m in messages" :key="m.id" :message="m" />
+          <ChatMessage v-for="m in messages" :key="m.id" :message="m" @feedback="onFeedback" />
           <div class="h-4" />
         </div>
       </div>
@@ -278,12 +300,15 @@ watch(isStreaming, (streaming) => {
       <ChatInput
         :streaming="isStreaming"
         :uploading="uploading"
-        :contract-mode="contractMode"
+        :rag-mode="ragMode"
         @send="send"
         @stop="stop"
         @attach="onAttach"
-        @toggle-contract="setContractMode(!contractMode)"
+        @toggle-rag="setRagMode(!ragMode)"
       />
     </div>
+
+    <!-- Administración de la base de conocimiento (RAG · Oracle 23ai) -->
+    <KnowledgeBase v-if="showKnowledge" @close="showKnowledge = false" />
   </div>
 </template>
