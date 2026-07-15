@@ -170,7 +170,7 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 	})
 	flusher.Flush()
 
-	body, err := s.ollama.Stream(r.Context(), prep.Model, prep.Messages, nil, prep.Options)
+	body, err := s.ollama.Stream(r.Context(), prep.Model, prep.Messages, prep.Options)
 	if err != nil {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()

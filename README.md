@@ -93,21 +93,6 @@ El esquema se crea automáticamente en el primer arranque (ver
 (`ORGANIZATION INMEMORY NEIGHBOR GRAPH`) requiere `vector_memory_size` en la
 instancia; si no está disponible, la búsqueda funciona en modo exacto.
 
-## Contract mode (structured analysis)
-
-Toggle **Modo contrato** in the composer to analyse an attached contract. The app
-sends a JSON-schema `format` plus a wide `num_ctx` and low temperature to Ollama,
-and renders the reply as a structured report (parties, dates, obligations,
-termination, governing law, and colour-coded risks) instead of prose. It works
-with any model; for a dedicated, preconfigured model create one from the bundled
-Modelfile — it then appears in the model picker:
-
-```bash
-ollama create contract-analyst -f deploy/Modelfile.contract
-```
-
-> Automated extraction only — not legal advice. Keep a human in the loop.
-
 ## Configuration
 
 Defaults live in `internal/config/config.go` and can be overridden by env vars:

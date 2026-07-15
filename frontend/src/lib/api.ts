@@ -48,8 +48,6 @@ interface StreamHandlers {
 /** Per-request chat options forwarded to Ollama. */
 export interface ChatOptions {
   model?: string
-  /** Structured-output constraint: "json" or a JSON schema object. */
-  format?: unknown
   /** Model params, e.g. { num_ctx: 8192, temperature: 0.1 }. */
   options?: Record<string, unknown>
 }
@@ -66,7 +64,7 @@ export async function streamChat(
 ): Promise<void> {
   await streamSSE(
     '/api/chat',
-    { messages, model: opts.model, format: opts.format, options: opts.options },
+    { messages, model: opts.model, options: opts.options },
     (event, data) => {
       switch (event) {
         case 'message':

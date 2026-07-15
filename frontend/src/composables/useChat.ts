@@ -59,60 +59,6 @@ const SYSTEM_PROMPT =
 // model's context window.
 const MAX_DOC_CHARS = 24_000
 
-// ── Contract mode (Phase 1) ────────────────────────────────────────────────
-const CONTRACT_PROMPT =
-  'Eres un analista de contratos. Analiza EXCLUSIVAMENTE el texto proporcionado ' +
-  '(documento adjunto y mensaje del usuario); no inventes cláusulas ni datos. ' +
-  'Responde ÚNICAMENTE con un objeto JSON válido conforme al esquema. Si un dato ' +
-  'no aparece en el texto, usa null. Cita literalmente la cláusula fuente cuando ' +
-  'sea posible. No des asesoría legal.'
-
-// Passed as Ollama's `format` to constrain the analysis to this shape.
-const CONTRACT_SCHEMA = {
-  type: 'object',
-  properties: {
-    resumen: { type: ['string', 'null'] },
-    partes: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: { nombre: { type: ['string', 'null'] }, rol: { type: ['string', 'null'] } },
-      },
-    },
-    objeto: { type: ['string', 'null'] },
-    fechas: {
-      type: 'object',
-      properties: {
-        inicio: { type: ['string', 'null'] },
-        fin: { type: ['string', 'null'] },
-        renovacion: { type: ['string', 'null'] },
-      },
-    },
-    pagos: { type: ['string', 'null'] },
-    obligaciones: { type: 'array', items: { type: 'string' } },
-    terminacion: { type: ['string', 'null'] },
-    responsabilidad: { type: ['string', 'null'] },
-    confidencialidad: { type: ['string', 'null'] },
-    ley_aplicable: { type: ['string', 'null'] },
-    jurisdiccion: { type: ['string', 'null'] },
-    riesgos: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          clausula: { type: ['string', 'null'] },
-          severidad: { type: 'string', enum: ['alta', 'media', 'baja'] },
-          motivo: { type: ['string', 'null'] },
-        },
-      },
-    },
-  },
-  required: ['resumen', 'partes', 'riesgos'],
-}
-
-// Wide context so multi-page contracts fit; low temperature for factual extraction.
-const CONTRACT_OPTIONS = { num_ctx: 8192, temperature: 0.1 }
-
 /** Reactive chat state + streaming logic, shared by the app shell. */
 export function useChat() {
   // All conversations, newest first. The active one's messages/docs arrays are
@@ -126,8 +72,6 @@ export function useChat() {
   const error = ref<string | null>(null)
   // Selected Ollama model; empty => backend uses its configured default.
   const model = ref('')
-  // When on, replies are structured contract analyses (JSON schema output).
-  const contractMode = ref(false)
   // When on, questions are answered by the RAG assistant (Oracle 23ai + Mistral).
   const ragMode = ref(localStorage.getItem('gogioia:rag') === '1')
 
@@ -137,14 +81,8 @@ export function useChat() {
     model.value = name
   }
 
-  function setContractMode(on: boolean) {
-    contractMode.value = on
-    if (on) setRagMode(false)
-  }
-
   function setRagMode(on: boolean) {
     ragMode.value = on
-    if (on) contractMode.value = false
     localStorage.setItem('gogioia:rag', on ? '1' : '0')
   }
 
@@ -152,9 +90,7 @@ export function useChat() {
 
   /** Assemble the full payload (system prompt + doc context + history). */
   function buildPayload(history: ChatMessage[]): ApiMessage[] {
-    const payload: ApiMessage[] = [
-      { role: 'system', content: contractMode.value ? CONTRACT_PROMPT : SYSTEM_PROMPT },
-    ]
+    const payload: ApiMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }]
 
     if (docs.value.length > 0) {
       const docText = docs.value
@@ -179,8 +115,7 @@ export function useChat() {
   // Per-request Ollama options. Crucial: when a document is attached we raise
   // num_ctx so the whole text fits — otherwise Ollama's small default context
   // (~2048 tokens) silently drops the document and the model hallucinates.
-  function chatOptions(contract: boolean): Record<string, number> | undefined {
-    if (contract) return CONTRACT_OPTIONS
+  function chatOptions(): Record<string, number> | undefined {
     if (docs.value.length > 0) return { num_ctx: 8192, temperature: 0.3 }
     return undefined
   }
@@ -201,14 +136,12 @@ export function useChat() {
       content: trimmed,
       createdAt: Date.now(),
     }
-    const contract = contractMode.value
     const rag = ragMode.value
     const assistantMsg: ChatMessage = {
       id: uid(),
       role: 'assistant',
       content: '',
       streaming: true,
-      contract: contract && !rag,
       rag,
       createdAt: Date.now(),
     }
@@ -248,11 +181,7 @@ export function useChat() {
         await streamChat(
           payload,
           { onToken },
-          {
-            model: model.value,
-            format: contract ? CONTRACT_SCHEMA : undefined,
-            options: chatOptions(contract),
-          },
+          { model: model.value, options: chatOptions() },
           controller.signal,
         )
       }
@@ -402,8 +331,6 @@ export function useChat() {
     isEmpty,
     model,
     setModel,
-    contractMode,
-    setContractMode,
     ragMode,
     setRagMode,
     send,

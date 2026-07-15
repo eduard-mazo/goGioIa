@@ -21,8 +21,6 @@ const {
   isStreaming,
   isEmpty,
   setModel,
-  contractMode,
-  setContractMode,
   ragMode,
   setRagMode,
   send,
@@ -189,8 +187,8 @@ watch(
   () => messages.value.reduce((n, m) => n + m.content.length, 0),
   scrollToBottom,
 )
-// When a reply finishes, its rendered height can jump (e.g. the contract
-// report replaces the streamed JSON), so re-anchor to the bottom.
+// When a reply finishes, its rendered height can jump (e.g. the RAG sources
+// and feedback controls appear), so re-anchor to the bottom.
 watch(isStreaming, (streaming) => {
   if (!streaming) scrollToBottom()
 })
@@ -302,12 +300,10 @@ watch(isStreaming, (streaming) => {
       <ChatInput
         :streaming="isStreaming"
         :uploading="uploading"
-        :contract-mode="contractMode"
         :rag-mode="ragMode"
         @send="send"
         @stop="stop"
         @attach="onAttach"
-        @toggle-contract="setContractMode(!contractMode)"
         @toggle-rag="setRagMode(!ragMode)"
       />
     </div>

@@ -2,9 +2,8 @@
 import { computed } from 'vue'
 import { Bot, Database, FileText, ThumbsDown, ThumbsUp, User } from 'lucide-vue-next'
 import MarkdownRenderer from './MarkdownRenderer.vue'
-import ContractReport from './ContractReport.vue'
 import { t } from '@/i18n'
-import type { ChatMessage, ContractReport as ContractReportData } from '@/types'
+import type { ChatMessage } from '@/types'
 
 const props = defineProps<{ message: ChatMessage }>()
 
@@ -17,18 +16,6 @@ const isUser = props.message.role === 'user'
 const showRagMeta = computed(
   () => !isUser && props.message.rag && !props.message.streaming && !props.message.error,
 )
-
-// Parse a finished contract reply into the structured report (null while
-// streaming or if the model didn't return valid JSON → falls back to markdown).
-const report = computed<ContractReportData | null>(() => {
-  if (!props.message.contract || props.message.streaming) return null
-  try {
-    const obj = JSON.parse(props.message.content)
-    return obj && typeof obj === 'object' ? (obj as ContractReportData) : null
-  } catch {
-    return null
-  }
-})
 </script>
 
 <template>
@@ -46,18 +33,9 @@ const report = computed<ContractReportData | null>(() => {
         {{ isUser ? t.chat.you : t.app.name }}
       </div>
 
-      <!-- Analizando contrato (modo contrato, en streaming) -->
-      <div
-        v-if="!isUser && message.contract && message.streaming"
-        class="flex items-center gap-2 text-sm text-muted-foreground"
-      >
-        <span class="status-dot text-primary" />
-        {{ t.contract.analyzing }}
-      </div>
-
       <!-- Consultando la base de conocimiento (modo RAG, sin fuentes aún) -->
       <div
-        v-else-if="!isUser && message.rag && message.streaming && !message.content && !message.sources"
+        v-if="!isUser && message.rag && message.streaming && !message.content && !message.sources"
         class="flex items-center gap-2 text-sm text-muted-foreground"
       >
         <span class="status-dot text-primary" />
@@ -73,10 +51,7 @@ const report = computed<ContractReportData | null>(() => {
         <span /><span /><span />
       </div>
 
-      <!-- Informe estructurado de contrato -->
-      <ContractReport v-else-if="report" :data="report" />
-
-      <!-- Texto / Markdown (incluye fallback si el JSON no es válido) -->
+      <!-- Texto / Markdown -->
       <template v-else>
         <MarkdownRenderer :content="message.content" :class="{ 'text-destructive': message.error }" />
         <span v-if="message.streaming && message.content" class="stream-caret" />

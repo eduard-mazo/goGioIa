@@ -12,8 +12,6 @@ export interface ChatMessage extends ApiMessage {
   streaming?: boolean
   error?: boolean
   createdAt: number
-  /** Assistant reply produced in "contract mode" (JSON to render as a report). */
-  contract?: boolean
   /** Assistant reply produced by the RAG assistant (knowledge base). */
   rag?: boolean
   /** Chunks retrieved from Oracle 23ai that grounded this reply. */
@@ -22,22 +20,6 @@ export interface ChatMessage extends ApiMessage {
   queryId?: string
   /** User rating already sent for this reply (-1 | 1). */
   feedback?: number
-}
-
-/** Structured contract analysis returned in "contract mode". */
-export interface ContractReport {
-  resumen?: string | null
-  partes?: { nombre?: string | null; rol?: string | null }[] | null
-  objeto?: string | null
-  fechas?: { inicio?: string | null; fin?: string | null; renovacion?: string | null } | null
-  pagos?: string | null
-  obligaciones?: string[] | null
-  terminacion?: string | null
-  responsabilidad?: string | null
-  confidencialidad?: string | null
-  ley_aplicable?: string | null
-  jurisdiccion?: string | null
-  riesgos?: { clausula?: string | null; severidad?: string | null; motivo?: string | null }[] | null
 }
 
 /** A PDF attached to the conversation as extra context. */

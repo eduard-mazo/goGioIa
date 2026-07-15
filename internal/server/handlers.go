@@ -57,7 +57,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 type chatRequest struct {
 	Model    string           `json:"model"`
 	Messages []ollama.Message `json:"messages"`
-	Format   json.RawMessage  `json:"format,omitempty"`
 	Options  map[string]any   `json:"options,omitempty"`
 }
 
@@ -90,7 +89,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx)
 
-	body, err := s.ollama.Stream(r.Context(), model, req.Messages, req.Format, req.Options)
+	body, err := s.ollama.Stream(r.Context(), model, req.Messages, req.Options)
 	if err != nil {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()
