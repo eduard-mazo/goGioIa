@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -113,7 +114,7 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(sw, r)
 			logger.LogAttrs(r.Context(), slog.LevelInfo, "http",
 				slog.String("request_id", GetRequestID(r.Context())),
-				slog.String("ip", clientIP(r)),
+				slog.String("ip", ClientIP(r)),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", sw.status),
@@ -123,10 +124,10 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// clientIP extrae la IP del cliente. Solo se confía en X-Forwarded-For si el
+// ClientIP extrae la IP del cliente. Solo se confía en X-Forwarded-For si el
 // peer es local (reverse proxy en la misma máquina); si el proxy corre en
 // otro host, ajustar aquí la lista de proxies confiables.
-func clientIP(r *http.Request) string {
+func ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -140,6 +141,31 @@ func clientIP(r *http.Request) string {
 		}
 	}
 	return host
+}
+
+// ── Origin check ───────────────────────────────────────────────────────────
+
+// OriginCheck rechaza peticiones mutantes a /api/ cuyo Origin no coincide con
+// el Host servido (defensa CSRF complementaria al doble-submit de cookie).
+// Las peticiones sin Origin (curl, scripts) se dejan pasar: la protección
+// real para navegadores es la cabecera X-CSRF-Token.
+func OriginCheck(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if origin := r.Header.Get("Origin"); origin != "" && origin != "null" {
+				if u, err := url.Parse(origin); err != nil || !strings.EqualFold(u.Host, r.Host) {
+					http.Error(w, `{"error":"forbidden","message":"origin no permitido"}`, http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ── Recover ────────────────────────────────────────────────────────────────

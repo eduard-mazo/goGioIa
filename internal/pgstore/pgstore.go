@@ -28,6 +28,9 @@ type Store struct {
 	mu        sync.Mutex
 	ready     bool
 	maintOnce sync.Once
+
+	settingsMu    sync.Mutex
+	settingsCache map[string]cachedSetting
 }
 
 // Open crea el pool de conexiones (perezoso: no conecta hasta el primer uso).
@@ -43,7 +46,7 @@ func Open(cfg config.Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("crear pool PostgreSQL: %w", err)
 	}
-	return &Store{pool: pool, cfg: cfg}, nil
+	return &Store{pool: pool, cfg: cfg, settingsCache: map[string]cachedSetting{}}, nil
 }
 
 // Close libera el pool.
@@ -82,19 +85,28 @@ func (s *Store) EnsureReady(ctx context.Context) error {
 		return fmt.Errorf("bootstrap admin: %w", err)
 	}
 	s.ready = true
-	// Mantenimiento periódico: particiones del mes corriente y siguiente,
-	// para procesos que corren meses sin reinicio.
-	s.maintOnce.Do(func() { go s.maintainPartitions() })
+	// Mantenimiento periódico: particiones del mes corriente y siguiente
+	// (para procesos que corren meses sin reinicio) y purga de sesiones
+	// vencidas/revocadas antiguas.
+	s.maintOnce.Do(func() { go s.maintain() })
 	return nil
 }
 
-func (s *Store) maintainPartitions() {
+func (s *Store) maintain() {
 	t := time.NewTicker(12 * time.Hour)
 	defer t.Stop()
 	for range t.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := s.ensurePartitions(ctx); err != nil {
 			log.Printf("aviso: mantenimiento de particiones: %v", err)
+		}
+		// Las sesiones muertas se conservan 7 días para inspección; el rastro
+		// permanente vive en app.audit_events.
+		if _, err := s.pool.Exec(ctx, `
+			DELETE FROM app.sessions
+			WHERE expires_at < now() - interval '7 days'
+			   OR (revoked_at IS NOT NULL AND revoked_at < now() - interval '7 days')`); err != nil {
+			log.Printf("aviso: purga de sesiones: %v", err)
 		}
 		cancel()
 	}

@@ -13,11 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"goGioIa/internal/audit"
+	"goGioIa/internal/auth"
 	"goGioIa/internal/config"
 	"goGioIa/internal/httpmw"
 	"goGioIa/internal/ollama"
 	"goGioIa/internal/pgstore"
 	"goGioIa/internal/rag"
+	"goGioIa/internal/session"
 	"goGioIa/internal/store"
 	"goGioIa/web"
 )
@@ -32,6 +35,11 @@ type Server struct {
 	dist   fs.FS
 	index  []byte
 	logger *slog.Logger
+
+	auditor      *audit.Auditor
+	auth         *auth.Service
+	sessions     *session.Manager
+	loginLimiter *httpmw.RateLimiter
 }
 
 // New constructs a Server, loading the embedded frontend assets.
@@ -69,15 +77,22 @@ func New(cfg config.Config) *Server {
 			log.Printf("aviso: postgres no disponible aún: %v", err)
 		}
 	}()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	auditor := audit.New(pg.Pool(), logger)
 	return &Server{
-		cfg:    cfg,
-		ollama: ol,
-		store:  st,
-		pg:     pg,
-		rag:    rag.New(cfg, st, ol),
-		dist:   dist,
-		index:  index,
-		logger: slog.New(slog.NewJSONHandler(os.Stdout, nil)),
+		cfg:      cfg,
+		ollama:   ol,
+		store:    st,
+		pg:       pg,
+		rag:      rag.New(cfg, st, ol),
+		dist:     dist,
+		index:    index,
+		logger:   logger,
+		auditor:  auditor,
+		auth:     auth.NewService(pg.Pool(), pg, auditor),
+		sessions: session.NewManager(pg),
+		// 10 intentos de login por minuto y por IP.
+		loginLimiter: httpmw.NewRateLimiter(10.0/60.0, 10),
 	}
 }
 
@@ -85,19 +100,37 @@ func New(cfg config.Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/config", s.handleConfig)
+	// Público: salud del servicio y login.
 	mux.HandleFunc("GET /api/health", s.handleHealth)
-	mux.HandleFunc("GET /api/models", s.handleModels)
-	mux.HandleFunc("POST /api/chat", s.handleChat)
-	mux.HandleFunc("POST /api/pdf", s.handlePDF)
+	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 
-	// RAG: base de conocimiento en Oracle 23ai + asistente con retrieval.
-	mux.HandleFunc("GET /api/rag/health", s.handleRagHealth)
-	mux.HandleFunc("GET /api/rag/documents", s.handleRagDocuments)
-	mux.HandleFunc("POST /api/rag/documents", s.handleRagUpload)
-	mux.HandleFunc("DELETE /api/rag/documents/{id}", s.handleRagDeleteDocument)
-	mux.HandleFunc("POST /api/rag/ask", s.handleRagAsk)
-	mux.HandleFunc("POST /api/rag/feedback", s.handleRagFeedback)
+	// Cuenta del usuario autenticado.
+	mux.HandleFunc("POST /api/auth/logout", s.requireAuth(s.handleLogout))
+	mux.HandleFunc("GET /api/auth/me", s.requireAuth(s.handleMe))
+	mux.HandleFunc("POST /api/auth/refresh", s.requireAuth(s.handleRefresh))
+	mux.HandleFunc("POST /api/auth/password", s.requireAuth(s.handleChangePassword))
+
+	// Funcionalidad de chat: requiere sesión.
+	mux.HandleFunc("GET /api/config", s.requireAuth(s.handleConfig))
+	mux.HandleFunc("GET /api/models", s.requireAuth(s.handleModels))
+	mux.HandleFunc("POST /api/chat", s.requireAuth(s.handleChat))
+	mux.HandleFunc("POST /api/pdf", s.requireAuth(s.handlePDF))
+
+	// RAG: consulta para usuarios; gestión de documentos solo admin.
+	mux.HandleFunc("GET /api/rag/health", s.requireAuth(s.handleRagHealth))
+	mux.HandleFunc("GET /api/rag/documents", s.requireAuth(s.handleRagDocuments))
+	mux.HandleFunc("POST /api/rag/ask", s.requireAuth(s.handleRagAsk))
+	mux.HandleFunc("POST /api/rag/feedback", s.requireAuth(s.handleRagFeedback))
+	mux.HandleFunc("POST /api/rag/documents", s.requireAdmin(s.handleRagUpload))
+	mux.HandleFunc("DELETE /api/rag/documents/{id}", s.requireAdmin(s.handleRagDeleteDocument))
+
+	// Administración de usuarios y sesiones.
+	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.handleAdminListUsers))
+	mux.HandleFunc("POST /api/admin/users", s.requireAdmin(s.handleAdminCreateUser))
+	mux.HandleFunc("PATCH /api/admin/users/{id}", s.requireAdmin(s.handleAdminUpdateUser))
+	mux.HandleFunc("DELETE /api/admin/users/{id}/sessions", s.requireAdmin(s.handleAdminRevokeUserSessions))
+	mux.HandleFunc("GET /api/admin/sessions", s.requireAdmin(s.handleAdminListSessions))
+	mux.HandleFunc("DELETE /api/admin/sessions/{id}", s.requireAdmin(s.handleAdminRevokeSession))
 
 	// Everything else is the SPA (static assets + client-side routes).
 	mux.Handle("/", s.staticHandler())
@@ -107,6 +140,7 @@ func (s *Server) Handler() http.Handler {
 		httpmw.Logging(s.logger),
 		httpmw.Recover(s.logger),
 		httpmw.SecureHeaders,
+		httpmw.OriginCheck,
 	)
 }
 
