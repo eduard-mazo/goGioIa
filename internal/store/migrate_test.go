@@ -1,0 +1,44 @@
+package store
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+)
+
+// Las versiones deben ser consecutivas desde 1: migrate() confía en el orden
+// del slice y en MAX(version) para saber qué falta por aplicar.
+func TestMigrationsAreOrdered(t *testing.T) {
+	for i, m := range migrations {
+		if m.version != i+1 {
+			t.Errorf("migración en posición %d tiene versión %d, se esperaba %d", i, m.version, i+1)
+		}
+		if strings.TrimSpace(m.description) == "" {
+			t.Errorf("migración %d sin descripción", m.version)
+		}
+		if len(m.statements) == 0 {
+			t.Errorf("migración %d sin sentencias", m.version)
+		}
+		for j, stmt := range m.statements {
+			if strings.TrimSpace(stmt) == "" {
+				t.Errorf("migración %d: sentencia %d vacía", m.version, j)
+			}
+		}
+	}
+}
+
+func TestIsTolerable(t *testing.T) {
+	for _, code := range tolerableORA {
+		err := fmt.Errorf("exec: %w", errors.New(code+": mensaje de oracle"))
+		if !isTolerable(err) {
+			t.Errorf("isTolerable(%s) = false, se esperaba true", code)
+		}
+	}
+	if isTolerable(errors.New("ORA-01400: cannot insert NULL")) {
+		t.Error("isTolerable aceptó un error que no es de «ya existe»")
+	}
+	if isTolerable(nil) {
+		t.Error("isTolerable(nil) debe ser false")
+	}
+}

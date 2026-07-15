@@ -97,10 +97,12 @@ de conocimiento y sobre archivos puntuales sin ingerirlos. Cada consulta queda t
 `rag_retrieved_chunks`, y los pulgares arriba/abajo de la UI alimentan
 `rag_feedback` para mejorar el sistema.
 
-El esquema se crea automáticamente en el primer arranque (ver
-`deploy/oracle_schema.sql`). El índice vectorial
-(`ORGANIZATION INMEMORY NEIGHBOR GRAPH`) requiere `vector_memory_size` en la
-instancia; si no está disponible, la búsqueda funciona en modo exacto.
+El esquema se crea y evoluciona automáticamente en el arranque mediante
+migraciones versionadas (`rag_schema_migrations`, ver
+`internal/store/migrate.go`; referencia en `deploy/oracle_schema.sql`). El
+índice vectorial es IVF (`ORGANIZATION NEIGHBOR PARTITIONS`), que no requiere
+`vector_memory_size`; si aun así no puede crearse, la búsqueda funciona en
+modo exacto.
 
 ## Configuration
 

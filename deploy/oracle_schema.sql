@@ -47,10 +47,11 @@ CREATE TABLE document_chunks (
     CONSTRAINT uq_doc_chunk UNIQUE (document_id, chunk_index)
 );
 
--- Requiere vector_memory_size configurado en la instancia. Si falla, la
--- búsqueda vectorial sigue funcionando en modo exacto (sin índice).
+-- Índice IVF: no requiere vector_memory_size (a diferencia del HNSW
+-- INMEMORY NEIGHBOR GRAPH). Si falla, la búsqueda vectorial sigue
+-- funcionando en modo exacto (sin índice).
 CREATE VECTOR INDEX idx_chunks_embedding ON document_chunks(embedding)
-  ORGANIZATION INMEMORY NEIGHBOR GRAPH
+  ORGANIZATION NEIGHBOR PARTITIONS
   DISTANCE COSINE
   WITH TARGET ACCURACY 95;
 
@@ -110,3 +111,38 @@ CREATE TABLE prompt_templates (
 --   ORGANIZATION INMEMORY NEIGHBOR GRAPH
 --   DISTANCE COSINE
 --   WITH TARGET ACCURACY 95;
+
+-- ── Migración 2: hardening (aplicada automáticamente por el servidor) ──────
+-- El esquema se versiona en rag_schema_migrations; estas sentencias son la
+-- referencia de lo que aplica internal/store/migrate.go.
+
+-- CREATE TABLE rag_schema_migrations (
+--     version     NUMBER PRIMARY KEY,
+--     description VARCHAR2(200 CHAR) NOT NULL,
+--     applied_at  TIMESTAMP DEFAULT SYSTIMESTAMP
+-- );
+
+-- Oracle no indexa las FKs automáticamente:
+CREATE INDEX idx_retrieved_chunk ON rag_retrieved_chunks(chunk_id);
+CREATE INDEX idx_feedback_query ON rag_feedback(query_id);
+CREATE INDEX idx_queries_template ON rag_queries(prompt_template_id);
+CREATE INDEX idx_queries_session ON rag_queries(session_id, created_at);
+
+-- Estados y banderas validados por la base:
+ALTER TABLE documents ADD CONSTRAINT ck_documents_status
+  CHECK (status IN ('UPLOADED','EXTRACTING','CHUNKED','EMBEDDED','FAILED'));
+ALTER TABLE rag_feedback ADD CONSTRAINT ck_feedback_rating
+  CHECK (rating BETWEEN -1 AND 1);
+ALTER TABLE prompt_templates ADD CONSTRAINT ck_template_active
+  CHECK (is_active IN ('Y','N'));
+ALTER TABLE rag_retrieved_chunks ADD CONSTRAINT ck_retrieved_used
+  CHECK (was_used_in_prompt IN ('Y','N'));
+
+-- Texto humano en caracteres, no bytes (AL32UTF8):
+ALTER TABLE documents MODIFY (file_name VARCHAR2(500 CHAR));
+ALTER TABLE documents MODIFY (error_message VARCHAR2(4000 CHAR));
+ALTER TABLE rag_feedback MODIFY (feedback_text VARCHAR2(2000 CHAR));
+
+-- Una valoración por usuario y respuesta (el código usa MERGE):
+ALTER TABLE rag_feedback ADD CONSTRAINT uq_feedback_query_user
+  UNIQUE (query_id, created_by);

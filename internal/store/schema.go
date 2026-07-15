@@ -1,10 +1,10 @@
 package store
 
-// DDL del modelo Oracle 23ai para el RAG. Se usa la «opción simple» del
-// modelo: un único modelo de embeddings (nomic-embed-text, 768 dims) con el
-// vector como columna de document_chunks. El bootstrap ejecuta cada sentencia
-// y tolera ORA-00955 (el objeto ya existe), así el arranque es idempotente.
-var schemaDDL = []string{
+// DDL base del modelo Oracle 23ai para el RAG (migración 1). Se usa la
+// «opción simple» del modelo: un único modelo de embeddings (nomic-embed-text,
+// 768 dims) con el vector como columna de document_chunks. La evolución
+// posterior del esquema vive en migrate.go como migraciones versionadas.
+var baseSchemaDDL = []string{
 	// ── Ingesta de documentos ────────────────────────────────────────────
 	`CREATE TABLE documents (
     document_id     RAW(16)  DEFAULT SYS_GUID() PRIMARY KEY,
@@ -85,10 +85,12 @@ var schemaDDL = []string{
 )`,
 }
 
-// El índice vectorial requiere vector_memory_size configurado en la instancia;
-// si falla se registra un aviso y la búsqueda sigue funcionando (exacta).
+// Índice vectorial IVF (NEIGHBOR PARTITIONS): a diferencia del HNSW
+// (INMEMORY NEIGHBOR GRAPH) no requiere vector_memory_size en la instancia,
+// por eso es el defecto operable. Se crea fuera de las migraciones porque su
+// fallo es tolerable: sin índice la búsqueda sigue funcionando (exacta).
 const vectorIndexDDL = `CREATE VECTOR INDEX idx_chunks_embedding ON document_chunks(embedding)
-  ORGANIZATION INMEMORY NEIGHBOR GRAPH
+  ORGANIZATION NEIGHBOR PARTITIONS
   DISTANCE COSINE
   WITH TARGET ACCURACY 95`
 

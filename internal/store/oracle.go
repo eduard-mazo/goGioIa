@@ -57,8 +57,9 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-// EnsureReady garantiza (una sola vez) que el esquema existe. Es tolerante a
-// arrancar con Oracle caído: cada petición reintenta hasta lograrlo.
+// EnsureReady garantiza (una sola vez) que el esquema está en su última
+// versión. Es tolerante a arrancar con Oracle caído: cada petición reintenta
+// hasta lograrlo.
 func (s *Store) EnsureReady(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -68,17 +69,12 @@ func (s *Store) EnsureReady(ctx context.Context) error {
 	if err := s.Ping(ctx); err != nil {
 		return fmt.Errorf("oracle no disponible: %w", err)
 	}
-	for _, ddl := range schemaDDL {
-		if _, err := s.db.ExecContext(ctx, ddl); err != nil {
-			if isAlreadyExists(err) {
-				continue
-			}
-			return fmt.Errorf("bootstrap del esquema: %w", err)
-		}
+	if err := s.migrate(ctx); err != nil {
+		return fmt.Errorf("migrar esquema: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, vectorIndexDDL); err != nil && !isAlreadyExists(err) {
+	if _, err := s.db.ExecContext(ctx, vectorIndexDDL); err != nil && !isTolerable(err) {
 		// Sin índice la búsqueda vectorial sigue funcionando (exacta).
-		log.Printf("aviso: no se pudo crear el índice vectorial (¿vector_memory_size?): %v", err)
+		log.Printf("aviso: no se pudo crear el índice vectorial: %v", err)
 	}
 	if err := s.seedTemplate(ctx); err != nil {
 		return fmt.Errorf("sembrar plantilla de prompt: %w", err)
@@ -86,11 +82,6 @@ func (s *Store) EnsureReady(ctx context.Context) error {
 	s.ready = true
 	log.Printf("oracle: esquema RAG verificado")
 	return nil
-}
-
-// isAlreadyExists reconoce «ORA-00955: name is already used by an existing object».
-func isAlreadyExists(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "ORA-00955")
 }
 
 func (s *Store) seedTemplate(ctx context.Context) error {
@@ -409,11 +400,19 @@ func (s *Store) SetQueryResponse(ctx context.Context, queryID []byte, response s
 	return err
 }
 
-// InsertFeedback guarda la valoración del usuario sobre una respuesta.
+// InsertFeedback guarda la valoración del usuario sobre una respuesta. Hay
+// una valoración por usuario y respuesta (uq_feedback_query_user): los clics
+// repetidos actualizan la fila existente en vez de acumular duplicados.
 func (s *Store) InsertFeedback(ctx context.Context, queryID []byte, rating int, text, createdBy string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO rag_feedback (feedback_id, query_id, rating, feedback_text, created_by)
-		VALUES (:1, :2, :3, :4, :5)`,
+		MERGE INTO rag_feedback f
+		USING (SELECT :1 query_id, :2 created_by FROM dual) src
+		ON (f.query_id = src.query_id AND NVL(f.created_by, '~') = NVL(src.created_by, '~'))
+		WHEN MATCHED THEN UPDATE SET rating = :3, feedback_text = :4, created_at = SYSTIMESTAMP
+		WHEN NOT MATCHED THEN INSERT (feedback_id, query_id, rating, feedback_text, created_by)
+		  VALUES (:5, :6, :7, :8, :9)`,
+		queryID, nullable(createdBy),
+		rating, nullable(text),
 		newID(), queryID, rating, nullable(text), nullable(createdBy))
 	return err
 }
