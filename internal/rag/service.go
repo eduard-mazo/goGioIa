@@ -82,6 +82,7 @@ func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte,
 		if existing.Status != store.StatusFailed {
 			return "", &ErrDuplicate{Doc: existing}
 		}
+		log.Printf("rag: reintento de %q: se descarta el intento fallido anterior", fileName)
 		raw, err := store.ParseID(existing.ID)
 		if err == nil {
 			if err := s.store.DeleteDocument(ctx, raw); err != nil {
@@ -90,10 +91,15 @@ func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte,
 		}
 	}
 
-	docID, err := s.store.CreateDocument(ctx, fileName, hash, MimeFor(fileName), uploadedBy, data)
+	// Tope propio: guardar el archivo son cientos de inserciones pequeñas; si
+	// Oracle se atasca, mejor un error visible que una subida colgada sin fin.
+	stageCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	docID, err := s.store.CreateDocument(stageCtx, fileName, hash, MimeFor(fileName), uploadedBy, data)
 	if err != nil {
 		return "", fmt.Errorf("registrar documento: %w", err)
 	}
+	log.Printf("rag: %q (%d bytes) en cola de ingesta", fileName, len(data))
 
 	s.wakeWorkers()
 

@@ -83,9 +83,11 @@ func (s *Server) handleRagUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("rag: subida de %q (%d bytes)", header.Filename, len(data))
 	uploadedBy := strings.TrimSpace(r.FormValue("uploadedBy"))
 	id, err := s.rag.IngestAsync(r.Context(), header.Filename, data, uploadedBy)
 	if err != nil {
+		log.Printf("rag: subida de %q rechazada: %v", header.Filename, err)
 		if dup, ok := errors.AsType[*rag.ErrDuplicate](err); ok {
 			writeJSON(w, http.StatusConflict, map[string]any{
 				"error":    "este documento ya está en la base de conocimiento",

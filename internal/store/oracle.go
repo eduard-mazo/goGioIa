@@ -222,8 +222,11 @@ func (s *Store) CreateDocument(ctx context.Context, fileName, hash, mimeType str
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO document_files (document_id, content) VALUES (:1, :2)`,
-		id, go_ora.Blob{Data: data}); err != nil {
+		INSERT INTO document_files (document_id, content) VALUES (:1, EMPTY_BLOB())`,
+		id); err != nil {
+		return nil, err
+	}
+	if err := appendBlobChunked(ctx, tx, id, data); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -236,6 +239,29 @@ func (s *Store) CreateDocument(ctx context.Context, fileName, hash, mimeType str
 		return nil, err
 	}
 	return id, nil
+}
+
+// blobChunkBytes cabe en un bind RAW de PL/SQL (máx. 32767). go-ora envía los
+// go_ora.Blob grandes en una única escritura LOB que puede colgarse sin error
+// (el read timeout por defecto es 0); por trozos, cada envío es pequeño.
+const blobChunkBytes = 30000
+
+// appendBlobChunked añade data al BLOB de document_files en trozos, dentro de
+// la transacción de CreateDocument.
+func appendBlobChunked(ctx context.Context, tx *sql.Tx, docID []byte, data []byte) error {
+	for from := 0; from < len(data); from += blobChunkBytes {
+		part := data[from:min(from+blobChunkBytes, len(data))]
+		if _, err := tx.ExecContext(ctx, `
+			DECLARE
+				l BLOB;
+			BEGIN
+				SELECT content INTO l FROM document_files WHERE document_id = :1 FOR UPDATE;
+				DBMS_LOB.WRITEAPPEND(l, :2, :3);
+			END;`, docID, len(part), part); err != nil {
+			return fmt.Errorf("guardar archivo (bytes %d-%d de %d): %w", from+1, from+len(part), len(data), err)
+		}
+	}
+	return nil
 }
 
 // SetDocumentStatus actualiza el estado (y opcionalmente el error) de un documento.
