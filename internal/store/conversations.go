@@ -31,7 +31,7 @@ type ConvMessage struct {
 func (s *Store) CreateConversation(ctx context.Context, sessionID []byte, userID, title, mode, model string) ([]byte, error) {
 	id := newID()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO conversations (conversation_id, session_id, user_id, title, mode, llm_model)
+		INSERT INTO conversations (conversation_id, session_id, user_id, title, conv_mode, llm_model)
 		VALUES (:1, :2, :3, :4, :5, :6)`,
 		id, sessionID, nullable(userID), nullable(title), mode, nullable(model))
 	if err != nil {
@@ -44,7 +44,7 @@ func (s *Store) CreateConversation(ctx context.Context, sessionID []byte, userID
 // reciente primero.
 func (s *Store) ListConversations(ctx context.Context, sessionID []byte) ([]Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT RAWTOHEX(c.conversation_id), NVL(c.title, ' '), c.mode, NVL(c.llm_model, ' '),
+		SELECT RAWTOHEX(c.conversation_id), NVL(c.title, ' '), c.conv_mode, NVL(c.llm_model, ' '),
 		       c.created_at, c.updated_at,
 		       (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.conversation_id)
 		FROM conversations c

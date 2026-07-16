@@ -179,13 +179,13 @@ CREATE TABLE conversations (
     session_id      RAW(16) NOT NULL,
     user_id         VARCHAR2(100 CHAR),
     title           VARCHAR2(200 CHAR),
-    mode            VARCHAR2(10) DEFAULT 'chat' NOT NULL,
+    conv_mode       VARCHAR2(10) DEFAULT 'chat' NOT NULL,  -- MODE es palabra reservada
     llm_model       VARCHAR2(50),
     summary         CLOB,            -- resumen rodante (fase futura)
     summary_upto    NUMBER DEFAULT 0 NOT NULL,
     created_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
     updated_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
-    CONSTRAINT ck_conv_mode CHECK (mode IN ('chat','rag'))
+    CONSTRAINT ck_conv_mode CHECK (conv_mode IN ('chat','rag'))
 );
 CREATE INDEX idx_conv_session ON conversations(session_id, updated_at);
 

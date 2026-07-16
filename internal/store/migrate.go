@@ -105,18 +105,19 @@ var migrations = []migration{
 		version:     4,
 		description: "conversaciones y mensajes (contexto server-side)",
 		statements: []string{
+			// conv_mode y no «mode»: MODE es palabra reservada (ORA-03050).
 			`CREATE TABLE conversations (
 			    conversation_id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
 			    session_id      RAW(16) NOT NULL,
 			    user_id         VARCHAR2(100 CHAR),
 			    title           VARCHAR2(200 CHAR),
-			    mode            VARCHAR2(10) DEFAULT 'chat' NOT NULL,
+			    conv_mode       VARCHAR2(10) DEFAULT 'chat' NOT NULL,
 			    llm_model       VARCHAR2(50),
 			    summary         CLOB,
 			    summary_upto    NUMBER DEFAULT 0 NOT NULL,
 			    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
 			    updated_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
-			    CONSTRAINT ck_conv_mode CHECK (mode IN ('chat','rag'))
+			    CONSTRAINT ck_conv_mode CHECK (conv_mode IN ('chat','rag'))
 			)`,
 			`CREATE INDEX idx_conv_session ON conversations(session_id, updated_at)`,
 			// query_id enlaza la respuesta con su trazabilidad RAG; SET NULL
