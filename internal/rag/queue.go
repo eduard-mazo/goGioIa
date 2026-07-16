@@ -65,7 +65,7 @@ func (s *Service) drainQueue(ctx context.Context, workerID int) {
 		if ctx.Err() != nil {
 			return
 		}
-		job, err := s.store.ClaimJob(ctx, store.JobIngestDocument, store.JobEmbedAttachment)
+		job, err := s.store.ClaimJob(ctx, store.JobIngestDocument, store.JobEmbedAttachment, store.JobSummarizeConversation)
 		if err != nil {
 			log.Printf("rag: worker %d no pudo reclamar trabajo: %v", workerID, err)
 			return
@@ -76,6 +76,8 @@ func (s *Service) drainQueue(ctx context.Context, workerID int) {
 		switch job.Type {
 		case store.JobEmbedAttachment:
 			s.runAttachmentJob(ctx, workerID, job)
+		case store.JobSummarizeConversation:
+			s.runSummaryJob(ctx, workerID, job)
 		default:
 			s.runIngestJob(ctx, workerID, job)
 		}

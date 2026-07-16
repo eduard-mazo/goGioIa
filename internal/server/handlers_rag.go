@@ -199,17 +199,21 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Memoria de seguimiento: últimos turnos de la conversación persistida.
+	// Memoria de seguimiento: resumen rodante + últimos turnos persistidos.
 	var convID []byte
 	var history []ollama.Message
 	if req.ConversationID != "" {
 		if id, err := store.ParseID(req.ConversationID); err == nil {
 			convID = id
-			if stored, err := s.store.ConversationMessages(r.Context(), id, ragHistoryWindow); err == nil {
+			if summary, stored, err := s.store.ConversationContext(r.Context(), id, ragHistoryWindow); err == nil {
 				for _, m := range stored {
 					history = append(history, ollama.Message{Role: m.Role, Content: m.Content})
 				}
 				history = trimHistory(history, ragHistoryWindow, maxRagHistoryMsgChars)
+				if summary != "" {
+					history = append([]ollama.Message{{Role: "system",
+						Content: "Resumen de la conversación hasta ahora:\n" + summary}}, history...)
+				}
 			} else {
 				log.Printf("rag: no se pudo leer el historial: %v", err)
 			}
@@ -261,7 +265,10 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 			queryID, _ := store.ParseID(prep.QueryID)
 			if err := s.store.AppendMessage(ctx, convID, "assistant", answer.String(), queryID); err != nil {
 				log.Printf("rag: no se pudo persistir la respuesta en la conversación: %v", err)
+				return
 			}
+			// Conversación larga → resumen rodante en segundo plano.
+			s.rag.MaybeSummarize(ctx, convID)
 		}
 	}
 	defer finish()

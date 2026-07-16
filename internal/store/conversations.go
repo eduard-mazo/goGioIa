@@ -134,6 +134,100 @@ func (s *Store) AppendMessage(ctx context.Context, convID []byte, role, content 
 	return err
 }
 
+// ConversationContext devuelve el resumen rodante y los últimos `limit`
+// mensajes posteriores a lo ya resumido, en orden cronológico: juntos forman
+// el contexto acotado de una conversación arbitrariamente larga.
+func (s *Store) ConversationContext(ctx context.Context, convID []byte, limit int) (summary string, msgs []ConvMessage, err error) {
+	var upto int
+	err = s.db.QueryRowContext(ctx, `
+		SELECT NVL(summary, ' '), summary_upto FROM conversations
+		WHERE conversation_id = :1`, convID).Scan(&summary, &upto)
+	if err != nil {
+		return "", nil, err
+	}
+	summary = strings.TrimSpace(summary)
+
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT RAWTOHEX(message_id), role, content, NVL(RAWTOHEX(query_id), ' '), created_at
+		FROM conversation_messages
+		WHERE conversation_id = :1 AND seq > :2
+		ORDER BY seq DESC
+		FETCH FIRST :3 ROWS ONLY`, convID, upto, limit)
+	if err != nil {
+		return "", nil, err
+	}
+	defer rows.Close()
+	msgs, err = scanConvMessages(rows)
+	if err != nil {
+		return "", nil, err
+	}
+	reverseMessages(msgs)
+	return summary, msgs, nil
+}
+
+// SummaryState devuelve el resumen actual, hasta qué seq cubre y el último
+// seq de la conversación (para decidir si toca resumir).
+func (s *Store) SummaryState(ctx context.Context, convID []byte) (summary string, upto, maxSeq int, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT NVL(c.summary, ' '), c.summary_upto,
+		       (SELECT NVL(MAX(m.seq), 0) FROM conversation_messages m
+		        WHERE m.conversation_id = c.conversation_id)
+		FROM conversations c
+		WHERE c.conversation_id = :1`, convID).Scan(&summary, &upto, &maxSeq)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return strings.TrimSpace(summary), upto, maxSeq, nil
+}
+
+// MessagesBetween devuelve los mensajes con fromSeq < seq <= toSeq en orden.
+func (s *Store) MessagesBetween(ctx context.Context, convID []byte, fromSeq, toSeq int) ([]ConvMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT RAWTOHEX(message_id), role, content, NVL(RAWTOHEX(query_id), ' '), created_at
+		FROM conversation_messages
+		WHERE conversation_id = :1 AND seq > :2 AND seq <= :3
+		ORDER BY seq
+		FETCH FIRST 200 ROWS ONLY`, convID, fromSeq, toSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanConvMessages(rows)
+}
+
+// SetSummary guarda el resumen rodante y hasta qué seq cubre.
+func (s *Store) SetSummary(ctx context.Context, convID []byte, summary string, upto int) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE conversations SET summary = :1, summary_upto = :2
+		WHERE conversation_id = :3`,
+		clob(summary), upto, convID)
+	return err
+}
+
+// scanConvMessages materializa filas de conversation_messages.
+func scanConvMessages(rows *sql.Rows) ([]ConvMessage, error) {
+	out := []ConvMessage{}
+	for rows.Next() {
+		var m ConvMessage
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.QueryID, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		m.ID = strings.ToLower(m.ID)
+		m.QueryID = strings.ToLower(strings.TrimSpace(m.QueryID))
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func reverseMessages(msgs []ConvMessage) {
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+}
+
 // DeleteConversation elimina la conversación y sus mensajes (CASCADE).
 func (s *Store) DeleteConversation(ctx context.Context, id []byte) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM conversations WHERE conversation_id = :1`, id)

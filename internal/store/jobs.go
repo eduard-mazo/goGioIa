@@ -11,8 +11,9 @@ import (
 
 // Tipos de trabajo de processing_jobs.
 const (
-	JobIngestDocument  = "ingest_document"
-	JobEmbedAttachment = "embed_attachment"
+	JobIngestDocument        = "ingest_document"
+	JobEmbedAttachment       = "embed_attachment"
+	JobSummarizeConversation = "summarize_conversation"
 )
 
 // ErrNoSourceFile señala que el archivo original ya no está en document_files
@@ -34,6 +35,34 @@ func (s *Store) EnqueueJob(ctx context.Context, jobType string, payloadID []byte
 		VALUES (:1, :2, :3)`,
 		newID(), jobType, payloadID)
 	return err
+}
+
+// EnqueueJobOnce encola el trabajo solo si no hay ya uno pendiente o en
+// ejecución del mismo tipo para el mismo payload.
+func (s *Store) EnqueueJobOnce(ctx context.Context, jobType string, payloadID []byte) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var pending int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM processing_jobs
+		WHERE payload_id = :1 AND job_type = :2 AND status IN ('QUEUED','RUNNING')`,
+		payloadID, jobType).Scan(&pending); err != nil {
+		return false, err
+	}
+	if pending > 0 {
+		return false, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO processing_jobs (job_id, job_type, payload_id)
+		VALUES (:1, :2, :3)`,
+		newID(), jobType, payloadID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // ClaimJob toma el trabajo QUEUED más antiguo de los tipos dados y lo marca

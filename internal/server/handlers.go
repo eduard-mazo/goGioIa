@@ -146,12 +146,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Historial: de Oracle si hay conversación y el store está listo (Ready
 	// no bloquea: con Oracle caído el chat sigue con el respaldo del cliente).
+	// En conversaciones largas el contexto es resumen rodante + últimos N.
 	history := req.History
+	var convSummary string
 	var convID []byte
 	if req.ConversationID != "" && s.store.Ready() {
 		if id, err := store.ParseID(req.ConversationID); err == nil {
 			convID = id
-			if stored, err := s.store.ConversationMessages(r.Context(), id, s.cfg.HistoryWindow); err == nil {
+			if summary, stored, err := s.store.ConversationContext(r.Context(), id, s.cfg.HistoryWindow); err == nil {
+				convSummary = summary
 				history = history[:0]
 				for _, m := range stored {
 					history = append(history, ollama.Message{Role: m.Role, Content: m.Content})
@@ -169,6 +172,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	msgs := []ollama.Message{{Role: "system", Content: chatSystemPrompt}}
 	if len(docs) > 0 {
 		msgs = append(msgs, ollama.Message{Role: "system", Content: docContext(docs)})
+	}
+	if convSummary != "" {
+		msgs = append(msgs, ollama.Message{Role: "system",
+			Content: "Resumen de la conversación hasta ahora:\n" + convSummary})
 	}
 	msgs = append(msgs, trimHistory(history, s.cfg.HistoryWindow, maxChatHistoryMsgChars)...)
 	msgs = append(msgs, ollama.Message{Role: "user", Content: question})
@@ -215,7 +222,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if err := s.store.AppendMessage(ctx, convID, "assistant", answer.String(), nil); err != nil {
 			log.Printf("chat: no se pudo persistir la respuesta: %v", err)
+			return
 		}
+		// Conversación larga → resumen rodante en segundo plano.
+		s.rag.MaybeSummarize(ctx, convID)
 	}()
 
 	scanner := bufio.NewScanner(body)

@@ -126,9 +126,13 @@ vectoriza dos veces.
 conversación server-side (`conversations` / `conversation_messages`); a partir
 de ahí el frontend solo envía el mensaje nuevo y el backend reconstruye la
 ventana de historial (`HISTORY_WINDOW`) desde Oracle — el modo RAG gana
-memoria de seguimiento («¿y en qué página está eso?»). Si Oracle no está
-disponible, el chat degrada al historial local del navegador sin perder
-funcionalidad. Cada consulta queda trazada en `rag_queries` +
+memoria de seguimiento («¿y en qué página está eso?»). En conversaciones
+largas, un trabajo en segundo plano (`summarize_conversation`) condensa lo
+que queda fuera de la ventana en un **resumen rodante**
+(`conversations.summary`), y el contexto pasa a ser resumen + últimos N
+mensajes: conversaciones arbitrariamente largas con contexto acotado y sin
+latencia añadida. Si Oracle no está disponible, el chat degrada al historial
+local del navegador sin perder funcionalidad. Cada consulta queda trazada en `rag_queries` +
 `rag_retrieved_chunks`, y los pulgares arriba/abajo de la UI alimentan
 `rag_feedback` para mejorar el sistema.
 
