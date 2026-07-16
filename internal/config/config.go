@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds the application's runtime settings.
@@ -37,6 +38,12 @@ type Config struct {
 	HistoryRetentionDays int
 	// HistoryWindow is how many stored conversation messages feed the prompt.
 	HistoryWindow int
+	// RAGCache enables the semantic answer cache (RAG_CACHE=0 disables).
+	RAGCache bool
+	// RAGCacheSim is the minimum cosine similarity to reuse a cached answer.
+	RAGCacheSim float64
+	// RAGCacheTTLHours expires cached answers after this many hours.
+	RAGCacheTTLHours int
 
 	// ── Oracle 23ai (vector store) ─────────────────────────────────────────
 	OracleUser     string
@@ -64,6 +71,8 @@ const (
 	defaultOllamaMaxConcurrent  = 2
 	defaultHistoryRetentionDays = 180
 	defaultHistoryWindow        = 12
+	defaultRAGCacheSim          = 0.97 // conservador: mejor perder hits que responder mal
+	defaultRAGCacheTTLHours     = 168  // una semana
 
 	defaultOracleUser     = ""
 	defaultOraclePassword = ""
@@ -90,6 +99,9 @@ func Load() Config {
 		OllamaMaxConcurrent:  envInt("OLLAMA_MAX_CONCURRENT", defaultOllamaMaxConcurrent),
 		HistoryRetentionDays: envIntAllowZero("RAG_HISTORY_RETENTION_DAYS", defaultHistoryRetentionDays),
 		HistoryWindow:        envInt("HISTORY_WINDOW", defaultHistoryWindow),
+		RAGCache:             envBool("RAG_CACHE", true),
+		RAGCacheSim:          envFloat("RAG_CACHE_THRESHOLD", defaultRAGCacheSim),
+		RAGCacheTTLHours:     envInt("RAG_CACHE_TTL_HOURS", defaultRAGCacheTTLHours),
 
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),
@@ -110,6 +122,28 @@ func envInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
+		}
+	}
+	return fallback
+}
+
+// envBool interpreta "0", "false" y "no" como falso; "1", "true", "yes" como
+// verdadero; cualquier otra cosa deja el valor por defecto.
+func envBool(key string, fallback bool) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "0", "false", "no", "off":
+		return false
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return fallback
+}
+
+// envFloat admite valores en (0, 1] (umbral de similitud).
+func envFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
+			return f
 		}
 	}
 	return fallback

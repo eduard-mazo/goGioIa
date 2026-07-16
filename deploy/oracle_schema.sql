@@ -235,3 +235,40 @@ CREATE VECTOR INDEX idx_attach_embedding ON attachment_chunks(embedding)
   ORGANIZATION NEIGHBOR PARTITIONS
   DISTANCE COSINE
   WITH TARGET ACCURACY 95;
+
+-- ── Migración 6: cache semántica, cache de embeddings y versión de la base ─
+
+CREATE TABLE rag_semantic_cache (
+    cache_id           RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    question_hash      VARCHAR2(64) NOT NULL,     -- sha256 de la pregunta normalizada
+    question_text      CLOB NOT NULL,
+    question_embedding VECTOR(768, FLOAT32) NOT NULL,
+    llm_model          VARCHAR2(50) NOT NULL,
+    template_id        RAW(16) REFERENCES prompt_templates(template_id),
+    kb_version         NUMBER NOT NULL,           -- invalidación al cambiar la base
+    response_text      CLOB NOT NULL,
+    sources_json       CLOB CHECK (sources_json IS JSON),
+    hit_count          NUMBER DEFAULT 0 NOT NULL,
+    created_at         TIMESTAMP DEFAULT SYSTIMESTAMP,
+    last_hit_at        TIMESTAMP,
+    expires_at         TIMESTAMP
+);
+CREATE INDEX idx_cache_lookup ON rag_semantic_cache(question_hash, llm_model, kb_version);
+CREATE INDEX idx_cache_expiry ON rag_semantic_cache(expires_at);
+CREATE INDEX idx_cache_template ON rag_semantic_cache(template_id);
+
+CREATE TABLE rag_kb_state (
+    id      NUMBER PRIMARY KEY,
+    version NUMBER NOT NULL,
+    CONSTRAINT ck_kb_singleton CHECK (id = 1)
+);
+INSERT INTO rag_kb_state (id, version) VALUES (1, 1);
+
+CREATE TABLE embedding_cache (
+    text_hash    VARCHAR2(64) PRIMARY KEY,        -- sha256(modelo || prefijo || texto)
+    model        VARCHAR2(100) NOT NULL,
+    embedding    VECTOR(768, FLOAT32) NOT NULL,
+    use_count    NUMBER DEFAULT 1 NOT NULL,
+    created_at   TIMESTAMP DEFAULT SYSTIMESTAMP,
+    last_used_at TIMESTAMP DEFAULT SYSTIMESTAMP
+);

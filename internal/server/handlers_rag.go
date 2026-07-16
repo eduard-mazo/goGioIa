@@ -22,7 +22,8 @@ import (
 func (s *Server) handleRagHealth(w http.ResponseWriter, r *http.Request) {
 	status := "online"
 	var detail string
-	docs, chunks, pending := 0, 0, 0
+	docs, chunks, pending, cacheEntries := 0, 0, 0, 0
+	var kbVersion int64
 	if err := s.store.EnsureReady(r.Context()); err != nil {
 		status = "offline"
 		detail = err.Error()
@@ -33,15 +34,20 @@ func (s *Server) handleRagHealth(w http.ResponseWriter, r *http.Request) {
 		if p, err := s.store.PendingJobs(r.Context()); err == nil {
 			pending = p
 		}
+		if e, v, err := s.store.CacheStats(r.Context()); err == nil {
+			cacheEntries, kbVersion = e, v
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"oracle":      status,
-		"detail":      detail,
-		"documents":   docs,
-		"chunks":      chunks,
-		"pendingJobs": pending,
-		"embedModel":  s.cfg.EmbedModel,
-		"ragModel":    s.cfg.RAGModel,
+		"oracle":       status,
+		"detail":       detail,
+		"documents":    docs,
+		"chunks":       chunks,
+		"pendingJobs":  pending,
+		"cacheEntries": cacheEntries,
+		"kbVersion":    kbVersion,
+		"embedModel":   s.cfg.EmbedModel,
+		"ragModel":     s.cfg.RAGModel,
 	})
 }
 
@@ -226,19 +232,17 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Las fuentes van primero: la UI las muestra mientras el modelo escribe.
+	// Se serializan una vez: el mismo JSON alimenta la cache semántica.
+	srcJSON, _ := json.Marshal(sourcesForUI(prep.Sources))
+	if prep.Cached && prep.SourcesJSON != "" {
+		srcJSON = []byte(prep.SourcesJSON)
+	}
 	writeSSE(w, "sources", map[string]any{
 		"queryId": prep.QueryID,
-		"sources": sourcesForUI(prep.Sources),
+		"cached":  prep.Cached,
+		"sources": json.RawMessage(srcJSON),
 	})
 	flusher.Flush()
-
-	body, err := s.ollama.Stream(r.Context(), prep.Model, prep.Messages, prep.Options)
-	if err != nil {
-		writeSSE(w, "error", map[string]string{"error": err.Error()})
-		flusher.Flush()
-		return
-	}
-	defer body.Close()
 
 	var answer strings.Builder
 	finish := func() {
@@ -248,8 +252,10 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 		// La petición pudo abortarse: se persiste con contexto propio.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := s.rag.FinishAsk(ctx, prep.QueryID, answer.String()); err != nil {
-			log.Printf("rag: no se pudo guardar la respuesta: %v", err)
+		if !prep.Cached { // los hits ya quedaron persistidos en PrepareAsk
+			if err := s.rag.FinishAsk(ctx, prep, answer.String(), string(srcJSON)); err != nil {
+				log.Printf("rag: no se pudo guardar la respuesta: %v", err)
+			}
 		}
 		if convID != nil {
 			queryID, _ := store.ParseID(prep.QueryID)
@@ -259,6 +265,23 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer finish()
+
+	// Hit de cache: la respuesta se emite completa, sin pasar por el LLM.
+	if prep.Cached {
+		answer.WriteString(prep.Answer)
+		writeSSE(w, "message", map[string]string{"content": prep.Answer})
+		writeSSE(w, "done", map[string]any{"done": true, "queryId": prep.QueryID, "cached": true})
+		flusher.Flush()
+		return
+	}
+
+	body, err := s.ollama.Stream(r.Context(), prep.Model, prep.Messages, prep.Options)
+	if err != nil {
+		writeSSE(w, "error", map[string]string{"error": err.Error()})
+		flusher.Flush()
+		return
+	}
+	defer body.Close()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)

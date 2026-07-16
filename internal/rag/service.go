@@ -190,6 +190,10 @@ func (s *Service) runIngest(docID []byte, fileName string, data []byte) error {
 	if err := s.store.FinishDocument(ctx, docID, pageCount); err != nil {
 		return fail("finalizar documento", err)
 	}
+	// La base cambió: invalida (por versión) la cache semántica de respuestas.
+	if err := s.store.BumpKBVersion(ctx); err != nil {
+		log.Printf("rag: no se pudo incrementar la versión de la base: %v", err)
+	}
 	log.Printf("rag: %q ingerido (%d páginas, %d chunks)", fileName, pageCount, len(chunks))
 	return nil
 }
@@ -233,6 +237,53 @@ type Prepared struct {
 	Messages []ollama.Message     // prompt final para el LLM
 	Model    string               // modelo con el que se generará
 	Options  map[string]any       // parámetros del modelo
+
+	// Cached indica que la respuesta salió de la cache semántica: no hay que
+	// llamar al LLM, Answer y SourcesJSON traen lo que se debe emitir.
+	Cached      bool
+	Answer      string
+	SourcesJSON string
+
+	// cache trae la clave para poblar la cache al terminar (miss cacheable).
+	cache *cacheSeed
+}
+
+// cacheSeed es la clave con la que se guardará la respuesta generada.
+type cacheSeed struct {
+	hash       string
+	question   string
+	vec        []float32
+	model      string
+	templateID []byte
+	kbVersion  int64
+}
+
+// questionHash normaliza la pregunta (minúsculas, espacios colapsados) y la
+// resume para el atajo de hit exacto de la cache.
+func questionHash(question string) string {
+	norm := strings.ToLower(strings.Join(strings.Fields(question), " "))
+	sum := sha256.Sum256([]byte(norm))
+	return hex.EncodeToString(sum[:])
+}
+
+// embedQueryCached vectoriza una consulta pasando por embedding_cache: el
+// mismo texto no se envía dos veces a Ollama.
+func (s *Service) embedQueryCached(ctx context.Context, question string) ([]float32, error) {
+	sum := sha256.Sum256([]byte(s.cfg.EmbedModel + "\x00" + queryPrefix + question))
+	hash := hex.EncodeToString(sum[:])
+	if vec, err := s.store.CachedEmbedding(ctx, hash); err == nil && vec != nil {
+		return vec, nil
+	} else if err != nil {
+		log.Printf("rag: cache de embeddings no disponible: %v", err)
+	}
+	vec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, queryPrefix+question)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.PutCachedEmbedding(ctx, hash, s.cfg.EmbedModel, vec); err != nil {
+		log.Printf("rag: no se pudo cachear el embedding: %v", err)
+	}
+	return vec, nil
 }
 
 // PrepareAsk vectoriza la pregunta, recupera los chunks más afines desde
@@ -253,10 +304,46 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		model = s.cfg.RAGModel
 	}
 
+	// Plantilla activa (también es parte de la clave de la cache).
+	templateID, templateText, err := s.store.ActiveTemplate(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("cargar plantilla de prompt: %w", err)
+	}
+
+	// 0. Cache semántica: solo preguntas sin contexto adicional (adjuntos o
+	// historial de seguimiento hacen la respuesta no reutilizable).
+	cacheable := s.cfg.RAGCache && len(attached) == 0 && len(attachmentIDs) == 0 && len(history) == 0
+	var kbVersion int64
+	var qhash string
+	if cacheable {
+		if kbVersion, err = s.store.KBVersion(ctx); err != nil {
+			log.Printf("rag: sin versión de la base, cache desactivada: %v", err)
+			cacheable = false
+		}
+	}
+	if cacheable {
+		qhash = questionHash(question)
+		if hit, err := s.store.LookupCacheExact(ctx, qhash, model, templateID, kbVersion); err != nil {
+			log.Printf("rag: lookup exacto de cache falló: %v", err)
+		} else if hit != nil {
+			return s.preparedFromCache(ctx, hit, question, nil, model, sessionID, userID, templateID)
+		}
+	}
+
 	// 1. Embedding de la consulta (mismo espacio vectorial que los chunks).
-	qVec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, queryPrefix+question)
+	qVec, err := s.embedQueryCached(ctx, question)
 	if err != nil {
 		return nil, fmt.Errorf("vectorizar la pregunta: %w", err)
+	}
+
+	// 1b. Cache semántica por cercanía: una pregunta equivalente ya
+	// respondida se sirve sin generar.
+	if cacheable {
+		if hit, err := s.store.LookupCacheSemantic(ctx, qVec, model, templateID, kbVersion, 1-s.cfg.RAGCacheSim); err != nil {
+			log.Printf("rag: lookup semántico de cache falló: %v", err)
+		} else if hit != nil {
+			return s.preparedFromCache(ctx, hit, question, qVec, model, sessionID, userID, templateID)
+		}
 	}
 
 	// 2. Retrieval por similitud coseno.
@@ -270,10 +357,6 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	attached = append(attached, s.resolveAttachments(ctx, attachmentIDs, func() []float32 { return qVec })...)
 
 	// 3. Prompt desde la plantilla activa (versionada en prompt_templates).
-	templateID, templateText, err := s.store.ActiveTemplate(ctx, "")
-	if err != nil {
-		return nil, fmt.Errorf("cargar plantilla de prompt: %w", err)
-	}
 	prompt := renderPrompt(templateText, question, sources, attached)
 
 	// 4. Trazabilidad: consulta + chunks usados.
@@ -295,22 +378,65 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	msgs = append(msgs, history...)
 	msgs = append(msgs, ollama.Message{Role: "user", Content: prompt})
 
-	return &Prepared{
+	prep := &Prepared{
 		QueryID:  hex.EncodeToString(queryID),
 		Sources:  sources,
 		Messages: msgs,
 		Model:    model,
 		Options:  map[string]any{"num_ctx": numCtx, "temperature": 0.2},
+	}
+	if cacheable {
+		prep.cache = &cacheSeed{
+			hash: qhash, question: question, vec: qVec,
+			model: model, templateID: templateID, kbVersion: kbVersion,
+		}
+	}
+	return prep, nil
+}
+
+// preparedFromCache registra la consulta (trazabilidad) y devuelve la
+// respuesta cacheada lista para emitirse sin pasar por el LLM.
+func (s *Service) preparedFromCache(ctx context.Context, hit *store.CachedAnswer, question string, qVec []float32, model, sessionID, userID string, templateID []byte) (*Prepared, error) {
+	queryID, err := s.store.CreateQuery(ctx, store.SessionID(sessionID), userID, question, qVec, model, templateID)
+	if err != nil {
+		return nil, fmt.Errorf("registrar consulta: %w", err)
+	}
+	if err := s.store.SetQueryResponse(ctx, queryID, hit.Response); err != nil {
+		log.Printf("rag: no se pudo guardar la respuesta cacheada en la consulta: %v", err)
+	}
+	if err := s.store.RecordCacheHit(ctx, hit.ID); err != nil {
+		log.Printf("rag: no se pudo registrar el hit de cache: %v", err)
+	}
+	log.Printf("rag: respuesta servida desde la cache semántica (similitud %.3f)", hit.Similarity)
+	return &Prepared{
+		QueryID:     hex.EncodeToString(queryID),
+		Model:       model,
+		Cached:      true,
+		Answer:      hit.Response,
+		SourcesJSON: hit.SourcesJSON,
 	}, nil
 }
 
-// FinishAsk completa la fila de rag_queries con la respuesta generada.
-func (s *Service) FinishAsk(ctx context.Context, queryIDHex, response string) error {
-	id, err := store.ParseID(queryIDHex)
+// FinishAsk completa la fila de rag_queries con la respuesta generada y, si
+// la consulta era cacheable, la guarda en la cache semántica con las fuentes
+// tal como se mostraron (sourcesJSON).
+func (s *Service) FinishAsk(ctx context.Context, prep *Prepared, response, sourcesJSON string) error {
+	id, err := store.ParseID(prep.QueryID)
 	if err != nil {
 		return err
 	}
-	return s.store.SetQueryResponse(ctx, id, response)
+	if err := s.store.SetQueryResponse(ctx, id, response); err != nil {
+		return err
+	}
+	if prep.cache != nil && strings.TrimSpace(response) != "" {
+		c := prep.cache
+		ttl := time.Duration(s.cfg.RAGCacheTTLHours) * time.Hour
+		if err := s.store.PutCache(ctx, c.hash, c.question, c.vec, c.model,
+			c.templateID, c.kbVersion, response, sourcesJSON, ttl); err != nil {
+			log.Printf("rag: no se pudo poblar la cache semántica: %v", err)
+		}
+	}
+	return nil
 }
 
 // Feedback guarda la valoración del usuario (-1 / 0 / 1) sobre una respuesta.
@@ -325,7 +451,23 @@ func (s *Service) Feedback(ctx context.Context, queryIDHex string, rating int, c
 	if rating < -1 || rating > 1 {
 		return fmt.Errorf("rating fuera de rango (-1, 0, 1)")
 	}
-	return s.store.InsertFeedback(ctx, id, rating, comment, createdBy)
+	if err := s.store.InsertFeedback(ctx, id, rating, comment, createdBy); err != nil {
+		return err
+	}
+	// Un 👎 invalida las respuestas cacheadas equivalentes: el ciclo de
+	// feedback tiene efecto inmediato en lo que se sirve.
+	if rating < 0 {
+		qhash := ""
+		if text, err := s.store.QueryText(ctx, id); err == nil {
+			qhash = questionHash(text)
+		}
+		if n, err := s.store.InvalidateCache(ctx, qhash, id, 1-s.cfg.RAGCacheSim); err != nil {
+			log.Printf("rag: no se pudo invalidar la cache por feedback: %v", err)
+		} else if n > 0 {
+			log.Printf("rag: %d entrada(s) de cache invalidada(s) por feedback negativo", n)
+		}
+	}
+	return nil
 }
 
 // renderPrompt sustituye {context} y {question} en la plantilla. El contexto

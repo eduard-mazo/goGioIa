@@ -318,6 +318,11 @@ func (s *Store) DeleteDocument(ctx context.Context, id []byte) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return sql.ErrNoRows
 	}
+	// La base cambió: las respuestas cacheadas dejan de ser elegibles.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE rag_kb_state SET version = version + 1 WHERE id = 1`); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -398,15 +403,20 @@ func (s *Store) SearchChunks(ctx context.Context, embedding []float32, topK int)
 
 // ── Trazabilidad del RAG (rag_queries / rag_retrieved_chunks / rag_feedback) ──
 
-// CreateQuery registra la pregunta (con su embedding) y devuelve el query_id.
+// CreateQuery registra la pregunta (con su embedding, si lo hay: los hits
+// exactos de cache no vectorizan) y devuelve el query_id.
 func (s *Store) CreateQuery(ctx context.Context, sessionID []byte, userID, question string, embedding []float32, llmModel string, templateID []byte) ([]byte, error) {
 	id := newID()
+	var vec any
+	if len(embedding) > 0 {
+		vec = vecLiteral(embedding)
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO rag_queries
 		  (query_id, session_id, user_id, query_text, query_embedding, llm_model, prompt_template_id)
 		VALUES (:1, :2, :3, :4, TO_VECTOR(:5), :6, :7)`,
 		id, sessionID, nullable(userID), clob(question),
-		vecLiteral(embedding), llmModel, templateID)
+		vec, llmModel, templateID)
 	if err != nil {
 		return nil, err
 	}

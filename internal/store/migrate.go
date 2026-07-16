@@ -169,6 +169,51 @@ var migrations = []migration{
 			)`,
 		},
 	},
+	{
+		version:     6,
+		description: "cache semántica de respuestas, cache de embeddings y versión de la base",
+		statements: []string{
+			// sources_json es CLOB con CHECK IS JSON (y no el tipo JSON
+			// nativo/OSON) para no depender del soporte del driver go-ora.
+			`CREATE TABLE rag_semantic_cache (
+			    cache_id           RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+			    question_hash      VARCHAR2(64) NOT NULL,
+			    question_text      CLOB NOT NULL,
+			    question_embedding VECTOR(768, FLOAT32) NOT NULL,
+			    llm_model          VARCHAR2(50) NOT NULL,
+			    template_id        RAW(16) REFERENCES prompt_templates(template_id),
+			    kb_version         NUMBER NOT NULL,
+			    response_text      CLOB NOT NULL,
+			    sources_json       CLOB CHECK (sources_json IS JSON),
+			    hit_count          NUMBER DEFAULT 0 NOT NULL,
+			    created_at         TIMESTAMP DEFAULT SYSTIMESTAMP,
+			    last_hit_at        TIMESTAMP,
+			    expires_at         TIMESTAMP
+			)`,
+			`CREATE INDEX idx_cache_lookup ON rag_semantic_cache(question_hash, llm_model, kb_version)`,
+			`CREATE INDEX idx_cache_expiry ON rag_semantic_cache(expires_at)`,
+			`CREATE INDEX idx_cache_template ON rag_semantic_cache(template_id)`,
+
+			// Versión de la base de conocimiento: cada ingesta/borrado la
+			// incrementa e invalida (por clave) las respuestas cacheadas.
+			`CREATE TABLE rag_kb_state (
+			    id      NUMBER PRIMARY KEY,
+			    version NUMBER NOT NULL,
+			    CONSTRAINT ck_kb_singleton CHECK (id = 1)
+			)`,
+			`INSERT INTO rag_kb_state (id, version) VALUES (1, 1)`,
+
+			// Texto idéntico no se re-vectoriza: sha256(modelo‖prefijo‖texto).
+			`CREATE TABLE embedding_cache (
+			    text_hash    VARCHAR2(64) PRIMARY KEY,
+			    model        VARCHAR2(100) NOT NULL,
+			    embedding    VECTOR(768, FLOAT32) NOT NULL,
+			    use_count    NUMBER DEFAULT 1 NOT NULL,
+			    created_at   TIMESTAMP DEFAULT SYSTIMESTAMP,
+			    last_used_at TIMESTAMP DEFAULT SYSTIMESTAMP
+			)`,
+		},
+	},
 }
 
 // tolerableORA son los errores «ya existe / ya aplicado». El DDL de Oracle

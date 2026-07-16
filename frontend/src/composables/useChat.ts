@@ -187,11 +187,12 @@ export function useChat() {
             attachments: attachmentIds(),
           },
           {
-            onSources: (queryId, sources) => {
+            onSources: (queryId, sources, cached) => {
               const target = convMessages.find((m) => m.id === assistantMsg.id)
               if (target) {
                 target.queryId = queryId
                 target.sources = sources
+                target.cached = cached
               }
             },
             onToken,

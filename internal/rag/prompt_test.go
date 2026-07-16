@@ -51,3 +51,14 @@ func TestRenderPromptNoPageForTextSources(t *testing.T) {
 		t.Errorf("las fuentes sin página no deben citar «pág.»:\n%s", out)
 	}
 }
+
+func TestQuestionHashNormalizes(t *testing.T) {
+	a := questionHash("  ¿Qué es   EPM? ")
+	b := questionHash("¿qué es epm?")
+	if a != b {
+		t.Error("el hash debe ignorar mayúsculas y espacios repetidos")
+	}
+	if a == questionHash("otra pregunta") {
+		t.Error("preguntas distintas no deben colisionar")
+	}
+}

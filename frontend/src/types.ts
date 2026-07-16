@@ -20,6 +20,8 @@ export interface ChatMessage extends ApiMessage {
   queryId?: string
   /** User rating already sent for this reply (-1 | 1). */
   feedback?: number
+  /** Respuesta servida desde la cache semántica (sin pasar por el LLM). */
+  cached?: boolean
 }
 
 /** A PDF attached to the conversation as extra context. */

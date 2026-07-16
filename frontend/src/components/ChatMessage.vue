@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Bot, Database, FileText, ThumbsDown, ThumbsUp, User } from 'lucide-vue-next'
+import { Bot, Database, FileText, ThumbsDown, ThumbsUp, User, Zap } from 'lucide-vue-next'
 import MarkdownRenderer from './MarkdownRenderer.vue'
 import { t } from '@/i18n'
 import type { ChatMessage } from '@/types'
@@ -62,6 +62,13 @@ const showRagMeta = computed(
         <div class="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground">
           <Database class="h-3 w-3" />
           {{ t.rag.sources }}
+          <span
+            v-if="message.cached"
+            class="inline-flex items-center gap-1 rounded-sm border border-border px-1.5 py-0.5 text-[9px] normal-case tracking-normal text-[color:var(--epm-citrico)]"
+            :title="t.rag.cachedHint"
+          >
+            <Zap class="h-2.5 w-2.5" /> {{ t.rag.cached }}
+          </span>
         </div>
         <ul class="flex flex-wrap gap-1.5">
           <li

@@ -111,6 +111,17 @@ en la cola (`attachment_chunks`), recuperando en cada pregunta solo los
 fragmentos afines. Si Oracle no está disponible, el clip degrada al envío
 inline de siempre (`documents`).
 
+**Cache semántica** — las preguntas sin contexto adicional (sin adjuntos ni
+historial de seguimiento) pasan por `rag_semantic_cache`: primero un atajo por
+hash exacto de la pregunta normalizada (sin tocar Ollama) y luego una búsqueda
+por coseno sobre el embedding (`RAG_CACHE_THRESHOLD`, similitud mínima 0.97);
+un hit se emite al instante con sus fuentes originales y un badge «caché» en
+la UI. La cache se invalida por versión de la base (`rag_kb_state` se
+incrementa en cada ingesta/borrado), por TTL (`RAG_CACHE_TTL_HOURS`) y por
+**feedback negativo** (un 👎 borra las entradas equivalentes). Los embeddings
+de consultas también se cachean (`embedding_cache`): el mismo texto no se
+vectoriza dos veces.
+
 **Contexto de conversación** — el primer mensaje crea (de forma perezosa) una
 conversación server-side (`conversations` / `conversation_messages`); a partir
 de ahí el frontend solo envía el mensaje nuevo y el backend reconstruye la
@@ -147,6 +158,9 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `OLLAMA_MAX_CONCURRENT` | `2`                             | Max simultaneous chat generations    |
 | `RAG_HISTORY_RETENTION_DAYS` | `180`                      | Purge `rag_queries` older than this (0 = keep) |
 | `HISTORY_WINDOW`    | `12`                                | Stored messages fed back into the prompt |
+| `RAG_CACHE`         | `1`                                 | Semantic answer cache (0 disables)   |
+| `RAG_CACHE_THRESHOLD` | `0.97`                            | Min. cosine similarity to reuse an answer |
+| `RAG_CACHE_TTL_HOURS` | `168`                             | Cached answers expire after this     |
 | `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
 | `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
 | `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |

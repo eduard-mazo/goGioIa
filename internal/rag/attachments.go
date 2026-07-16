@@ -177,7 +177,7 @@ func (s *Service) AttachmentContext(ctx context.Context, ids []string, question 
 		if memo != nil {
 			return memo
 		}
-		vec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, queryPrefix+question)
+		vec, err := s.embedQueryCached(ctx, question)
 		if err != nil {
 			log.Printf("rag: no se pudo vectorizar la pregunta para los anexos: %v", err)
 			return nil

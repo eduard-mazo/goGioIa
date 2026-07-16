@@ -143,21 +143,25 @@ func (s *Service) RetryDocument(ctx context.Context, docIDHex string) error {
 	return nil
 }
 
-// purgeLoop aplica la retención del historial de consultas (rag_queries y,
-// por CASCADE, rag_retrieved_chunks y rag_feedback) una vez al día.
+// purgeLoop aplica una vez al día la retención del historial de consultas
+// (rag_queries y, por CASCADE, rag_retrieved_chunks y rag_feedback) y la
+// caducidad de la cache semántica.
 func (s *Service) purgeLoop(ctx context.Context) {
 	days := s.cfg.HistoryRetentionDays
-	if days <= 0 {
-		return
-	}
-	retention := time.Duration(days) * 24 * time.Hour
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
-		if n, err := s.store.PurgeOldQueries(ctx, retention); err != nil {
-			log.Printf("rag: purga de historial falló: %v", err)
+		if days > 0 {
+			if n, err := s.store.PurgeOldQueries(ctx, time.Duration(days)*24*time.Hour); err != nil {
+				log.Printf("rag: purga de historial falló: %v", err)
+			} else if n > 0 {
+				log.Printf("rag: purgadas %d consultas con más de %d días", n, days)
+			}
+		}
+		if n, err := s.store.PurgeExpiredCache(ctx); err != nil {
+			log.Printf("rag: purga de cache falló: %v", err)
 		} else if n > 0 {
-			log.Printf("rag: purgadas %d consultas con más de %d días", n, days)
+			log.Printf("rag: purgadas %d entradas de cache caducadas", n)
 		}
 		select {
 		case <-ctx.Done():

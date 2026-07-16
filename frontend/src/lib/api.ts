@@ -266,7 +266,7 @@ export async function sendRagFeedback(queryId: string, rating: number, comment =
 
 interface RagStreamHandlers {
   /** Fuentes recuperadas de Oracle; llegan antes que el primer token. */
-  onSources: (queryId: string, sources: RagSource[]) => void
+  onSources: (queryId: string, sources: RagSource[], cached: boolean) => void
   onToken: (token: string) => void
   onDone?: (queryId: string) => void
 }
@@ -302,7 +302,7 @@ export async function streamRagAsk(
         case 'sources': {
           const d = data as { queryId: string; sources: RagSource[] }
           queryId = d.queryId
-          handlers.onSources(d.queryId, d.sources ?? [])
+          handlers.onSources(d.queryId, d.sources ?? [], Boolean((data as { cached?: boolean }).cached))
           return true
         }
         case 'message':

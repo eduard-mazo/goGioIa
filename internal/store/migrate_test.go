@@ -51,3 +51,16 @@ func TestBindList(t *testing.T) {
 		t.Errorf("bindList(1,1) = %q", got)
 	}
 }
+
+func TestParseVecLiteral(t *testing.T) {
+	vec, err := parseVecLiteral("[1.5, -2, 3.25E-1]")
+	if err != nil || len(vec) != 3 || vec[0] != 1.5 || vec[1] != -2 || vec[2] != 0.325 {
+		t.Fatalf("parseVecLiteral = %v, %v", vec, err)
+	}
+	if _, err := parseVecLiteral("[]"); err == nil {
+		t.Error("un vector vacío debe fallar")
+	}
+	if _, err := parseVecLiteral("[1,a]"); err == nil {
+		t.Error("un literal corrupto debe fallar")
+	}
+}
