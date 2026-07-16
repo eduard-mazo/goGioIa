@@ -1,7 +1,13 @@
 import { computed, ref } from 'vue'
-import { sendRagFeedback, streamChat, streamRagAsk } from '@/lib/api'
+import {
+  createConversation as createServerConversation,
+  deleteServerConversation,
+  sendRagFeedback,
+  streamChat,
+  streamRagAsk,
+} from '@/lib/api'
 import { uid } from '@/lib/utils'
-import type { ApiMessage, AttachedDoc, ChatMessage, Conversation } from '@/types'
+import type { AttachedDoc, ChatMessage, Conversation } from '@/types'
 
 // Identifica la sesión del navegador para la trazabilidad en rag_queries.
 const SESSION_KEY = 'gogioia:session'
@@ -51,13 +57,16 @@ function deriveTitle(text: string): string {
   return clean.length > TITLE_MAX ? `${clean.slice(0, TITLE_MAX).trimEnd()}…` : clean
 }
 
-const SYSTEM_PROMPT =
-  'Eres el asistente local de goGioIa. Responde en español, claro y al grano. ' +
-  'Usa Markdown cuando ayude (listas, tablas y bloques de código con su lenguaje).'
-
-// Cap how much document text we inject per request to avoid overrunning the
-// model's context window.
+// Cap how much document text we send per request (the backend caps again).
 const MAX_DOC_CHARS = 24_000
+
+// Ventana del historial de respaldo cuando no hay conversación server-side.
+const LOCAL_HISTORY_WINDOW = 12
+
+// Tras fallar la creación de la conversación server-side (Oracle caído), no
+// se reintenta en cada envío para no añadir latencia.
+const SERVER_CONV_BACKOFF_MS = 60_000
+let serverConvBackoffUntil = 0
 
 /** Reactive chat state + streaming logic, shared by the app shell. */
 export function useChat() {
@@ -88,36 +97,29 @@ export function useChat() {
 
   const isEmpty = computed(() => messages.value.length === 0)
 
-  /** Assemble the full payload (system prompt + doc context + history). */
-  function buildPayload(history: ChatMessage[]): ApiMessage[] {
-    const payload: ApiMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }]
-
-    if (docs.value.length > 0) {
-      const docText = docs.value
-        .map((d) => `# Document: ${d.filename}\n\n${d.text.slice(0, MAX_DOC_CHARS)}`)
-        .join('\n\n---\n\n')
-      payload.push({
-        role: 'system',
-        content:
-          'The user attached the following document(s). Use them as context ' +
-          'when answering, and cite the document name when relevant:\n\n' +
-          docText,
-      })
-    }
-
-    for (const m of history) {
-      if (m.role === 'system') continue
-      payload.push({ role: m.role, content: m.content })
-    }
-    return payload
+  /** Adjuntos de la conversación en el formato que consume el backend. */
+  function docsPayload() {
+    return docs.value.map((d) => ({ name: d.filename, text: d.text.slice(0, MAX_DOC_CHARS) }))
   }
 
-  // Per-request Ollama options. Crucial: when a document is attached we raise
-  // num_ctx so the whole text fits — otherwise Ollama's small default context
-  // (~2048 tokens) silently drops the document and the model hallucinates.
-  function chatOptions(): Record<string, number> | undefined {
-    if (docs.value.length > 0) return { num_ctx: 8192, temperature: 0.3 }
-    return undefined
+  /**
+   * Garantiza (perezosamente) la conversación server-side: da contexto y
+   * persistencia en Oracle. Si falla (p.ej. Oracle caído) se sigue en modo
+   * local y se reintenta pasado el backoff.
+   */
+  async function ensureServerConversation(conv: Conversation | undefined, firstMessage: string, rag: boolean) {
+    if (!conv || conv.serverId || Date.now() < serverConvBackoffUntil) return
+    try {
+      conv.serverId = await createServerConversation(
+        sessionId(),
+        conv.title || deriveTitle(firstMessage),
+        rag ? 'rag' : 'chat',
+        model.value,
+      )
+      persist()
+    } catch {
+      serverConvBackoffUntil = Date.now() + SERVER_CONV_BACKOFF_MS
+    }
   }
 
   async function send(text: string) {
@@ -158,14 +160,19 @@ export function useChat() {
     }
 
     try {
+      // Conversación persistida en Oracle: contexto server-side + historial.
+      await ensureServerConversation(conv, trimmed, rag)
+      const serverId = conv?.serverId
+
       if (rag) {
         // Asistente RAG: el backend recupera contexto de Oracle 23ai y
-        // genera con Mistral; la conversación local no se reenvía, pero los
-        // documentos adjuntos con el clip sí viajan como contexto adicional.
+        // genera con Mistral; los adjuntos viajan como contexto adicional y
+        // la conversación server-side aporta memoria de seguimiento.
         await streamRagAsk(
           trimmed,
           sessionId(),
-          docs.value.map((d) => ({ name: d.filename, text: d.text.slice(0, MAX_DOC_CHARS) })),
+          docsPayload(),
+          serverId,
           {
             onSources: (queryId, sources) => {
               const target = convMessages.find((m) => m.id === assistantMsg.id)
@@ -179,11 +186,23 @@ export function useChat() {
           controller.signal,
         )
       } else {
-        const payload = buildPayload(convMessages.filter((m) => m.id !== assistantMsg.id))
+        // Con conversación server-side solo viaja el mensaje nuevo; si no la
+        // hay (Oracle caído), se envía el historial local como respaldo.
+        const history = serverId
+          ? undefined
+          : convMessages
+              .filter((m) => m.id !== userMsg.id && m.id !== assistantMsg.id && !m.error && m.content)
+              .slice(-LOCAL_HISTORY_WINDOW)
+              .map((m) => ({ role: m.role, content: m.content }))
         await streamChat(
-          payload,
+          {
+            conversationId: serverId,
+            message: trimmed,
+            history,
+            documents: docsPayload(),
+            model: model.value,
+          },
           { onToken },
-          { model: model.value, options: chatOptions() },
           controller.signal,
         )
       }
@@ -302,6 +321,8 @@ export function useChat() {
   function deleteConversation(id: string) {
     const idx = conversations.value.findIndex((c) => c.id === id)
     if (idx === -1) return
+    const serverId = conversations.value[idx].serverId
+    if (serverId) void deleteServerConversation(serverId).catch(() => {})
     conversations.value.splice(idx, 1)
     if (activeId.value === id) {
       // Fall back to the next chat, or a fresh blank if none remain.

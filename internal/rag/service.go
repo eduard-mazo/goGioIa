@@ -238,8 +238,10 @@ type Prepared struct {
 // PrepareAsk vectoriza la pregunta, recupera los chunks más afines desde
 // Oracle 23ai, construye el prompt con la plantilla activa (incluyendo los
 // documentos adjuntos de la conversación, si los hay) y deja registrada la
-// consulta (rag_queries + rag_retrieved_chunks).
-func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, userID string, attached []AttachedDoc) (*Prepared, error) {
+// consulta (rag_queries + rag_retrieved_chunks). history son turnos previos
+// de la conversación: dan memoria de seguimiento («¿y en qué página está?»)
+// y van como mensajes normales antes del prompt con el contexto.
+func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, userID string, attached []AttachedDoc, history []ollama.Message) (*Prepared, error) {
 	if err := s.store.EnsureReady(ctx); err != nil {
 		return nil, err
 	}
@@ -285,10 +287,14 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	if len(attached) > 0 {
 		numCtx = 16384
 	}
+	msgs := make([]ollama.Message, 0, len(history)+1)
+	msgs = append(msgs, history...)
+	msgs = append(msgs, ollama.Message{Role: "user", Content: prompt})
+
 	return &Prepared{
 		QueryID:  hex.EncodeToString(queryID),
 		Sources:  sources,
-		Messages: []ollama.Message{{Role: "user", Content: prompt}},
+		Messages: msgs,
 		Model:    model,
 		Options:  map[string]any{"num_ctx": numCtx, "temperature": 0.2},
 	}, nil

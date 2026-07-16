@@ -52,6 +52,10 @@ goGioIa/
 | GET    | `/api/config`             | Model name and app metadata                      |
 | GET    | `/api/health`             | Ollama reachability                              |
 | POST   | `/api/chat`               | Chat completion, streamed back as SSE            |
+| POST   | `/api/conversations`      | Create a server-side conversation                |
+| GET    | `/api/conversations`      | List conversations for a `sessionId`             |
+| GET    | `/api/conversations/{id}` | Stored messages of a conversation                |
+| DELETE | `/api/conversations/{id}` | Delete a conversation and its messages           |
 | POST   | `/api/pdf`                | Multipart PDF/text upload → extracted text (JSON) |
 | GET    | `/api/rag/health`         | Oracle 23ai status + knowledge-base stats        |
 | GET    | `/api/rag/documents`      | List ingested documents (status, chunks, pages)  |
@@ -100,7 +104,15 @@ activa de `prompt_templates` y genera la respuesta con **Mistral** en
 streaming. Los documentos adjuntos a la conversación con el clip también
 viajan en la petición (`documents`) y se inyectan en el contexto como
 `[Adjunto N]`, de modo que el modo RAG puede razonar a la vez sobre la base
-de conocimiento y sobre archivos puntuales sin ingerirlos. Cada consulta queda trazada en `rag_queries` +
+de conocimiento y sobre archivos puntuales sin ingerirlos.
+
+**Contexto de conversación** — el primer mensaje crea (de forma perezosa) una
+conversación server-side (`conversations` / `conversation_messages`); a partir
+de ahí el frontend solo envía el mensaje nuevo y el backend reconstruye la
+ventana de historial (`HISTORY_WINDOW`) desde Oracle — el modo RAG gana
+memoria de seguimiento («¿y en qué página está eso?»). Si Oracle no está
+disponible, el chat degrada al historial local del navegador sin perder
+funcionalidad. Cada consulta queda trazada en `rag_queries` +
 `rag_retrieved_chunks`, y los pulgares arriba/abajo de la UI alimentan
 `rag_feedback` para mejorar el sistema.
 
@@ -129,6 +141,7 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `RAG_WORKERS`       | `2`                                 | Ingest queue workers                 |
 | `OLLAMA_MAX_CONCURRENT` | `2`                             | Max simultaneous chat generations    |
 | `RAG_HISTORY_RETENTION_DAYS` | `180`                      | Purge `rag_queries` older than this (0 = keep) |
+| `HISTORY_WINDOW`    | `12`                                | Stored messages fed back into the prompt |
 | `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
 | `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
 | `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |

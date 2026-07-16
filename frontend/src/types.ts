@@ -33,6 +33,8 @@ export interface AttachedDoc {
 /** A saved conversation: its messages, attached docs, and metadata. */
 export interface Conversation {
   id: string
+  /** Id de la conversación persistida en Oracle (contexto server-side). */
+  serverId?: string
   /** Derived from the first user message; '' until the user writes something. */
   title: string
   messages: ChatMessage[]

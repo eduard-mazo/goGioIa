@@ -171,3 +171,35 @@ CREATE TABLE document_files (
     document_id RAW(16) PRIMARY KEY REFERENCES documents(document_id) ON DELETE CASCADE,
     content     BLOB NOT NULL
 );
+
+-- ── Migración 4: conversaciones y mensajes (contexto server-side) ──────────
+
+CREATE TABLE conversations (
+    conversation_id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    session_id      RAW(16) NOT NULL,
+    user_id         VARCHAR2(100 CHAR),
+    title           VARCHAR2(200 CHAR),
+    mode            VARCHAR2(10) DEFAULT 'chat' NOT NULL,
+    llm_model       VARCHAR2(50),
+    summary         CLOB,            -- resumen rodante (fase futura)
+    summary_upto    NUMBER DEFAULT 0 NOT NULL,
+    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT ck_conv_mode CHECK (mode IN ('chat','rag'))
+);
+CREATE INDEX idx_conv_session ON conversations(session_id, updated_at);
+
+CREATE TABLE conversation_messages (
+    message_id      RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    conversation_id RAW(16) NOT NULL
+                    REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    seq             NUMBER NOT NULL,
+    role            VARCHAR2(20) NOT NULL,
+    content         CLOB NOT NULL,
+    -- SET NULL: la purga de retención de rag_queries no debe chocar con la FK
+    query_id        RAW(16) REFERENCES rag_queries(query_id) ON DELETE SET NULL,
+    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT uq_conv_seq UNIQUE (conversation_id, seq),
+    CONSTRAINT ck_msg_role CHECK (role IN ('user','assistant'))
+);
+CREATE INDEX idx_msg_query ON conversation_messages(query_id);

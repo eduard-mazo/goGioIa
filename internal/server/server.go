@@ -75,6 +75,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/chat", s.handleChat)
 	mux.HandleFunc("POST /api/pdf", s.handlePDF)
 
+	// Conversaciones persistidas en Oracle (contexto server-side).
+	mux.HandleFunc("POST /api/conversations", s.handleConversationCreate)
+	mux.HandleFunc("GET /api/conversations", s.handleConversationsList)
+	mux.HandleFunc("GET /api/conversations/{id}", s.handleConversationGet)
+	mux.HandleFunc("DELETE /api/conversations/{id}", s.handleConversationDelete)
+
 	// RAG: base de conocimiento en Oracle 23ai + asistente con retrieval.
 	mux.HandleFunc("GET /api/rag/health", s.handleRagHealth)
 	mux.HandleFunc("GET /api/rag/documents", s.handleRagDocuments)

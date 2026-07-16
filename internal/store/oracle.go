@@ -84,6 +84,15 @@ func (s *Store) EnsureReady(ctx context.Context) error {
 	return nil
 }
 
+// Ready informa si el esquema ya se verificó, sin bloquear ni tocar la red.
+// Sirve para degradar funciones opcionales (contexto/persistencia) cuando
+// Oracle no está disponible, sin añadir latencia a rutas que no lo requieren.
+func (s *Store) Ready() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ready
+}
+
 func (s *Store) seedTemplate(ctx context.Context) error {
 	var n int
 	if err := s.db.QueryRowContext(ctx,

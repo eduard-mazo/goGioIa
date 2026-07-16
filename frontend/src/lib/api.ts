@@ -88,8 +88,22 @@ interface StreamHandlers {
   onDone?: () => void
 }
 
-/** Per-request chat options forwarded to Ollama. */
-export interface ChatOptions {
+/** Documento adjunto (nombre + texto extraído) que acompaña una petición. */
+export interface RagAttachedDoc {
+  name: string
+  text: string
+}
+
+/**
+ * Petición de chat. Con conversationId el backend construye el contexto desde
+ * Oracle y persiste el turno; history es el respaldo local cuando la
+ * conversación server-side no está disponible.
+ */
+export interface ChatPayload {
+  conversationId?: string
+  message: string
+  history?: ApiMessage[]
+  documents?: RagAttachedDoc[]
   model?: string
   /** Model params, e.g. { num_ctx: 8192, temperature: 0.1 }. */
   options?: Record<string, unknown>
@@ -100,14 +114,13 @@ export interface ChatOptions {
  * Resolves when the stream ends; rejects on transport or model errors.
  */
 export async function streamChat(
-  messages: ApiMessage[],
+  payload: ChatPayload,
   handlers: StreamHandlers,
-  opts: ChatOptions = {},
   signal?: AbortSignal,
 ): Promise<void> {
   await streamSSE(
     '/api/chat',
-    { messages, model: opts.model, options: opts.options },
+    payload,
     (event, data) => {
       switch (event) {
         case 'message':
@@ -124,6 +137,38 @@ export async function streamChat(
     signal,
   )
   handlers.onDone?.()
+}
+
+// ── Conversaciones persistidas (contexto server-side en Oracle) ────────────
+
+/**
+ * Registra una conversación en el servidor y devuelve su id. Timeout corto:
+ * si Oracle no responde, el chat sigue en modo local sin bloquear el envío.
+ */
+export async function createConversation(
+  sessionId: string,
+  title: string,
+  mode: 'chat' | 'rag',
+  model?: string,
+): Promise<string> {
+  const res = await fetch('/api/conversations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, title, mode, model }),
+    signal: AbortSignal.timeout(2500),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `create failed (${res.status})`)
+  return data.id as string
+}
+
+/** Elimina la conversación persistida (mensajes incluidos). */
+export async function deleteServerConversation(id: string): Promise<void> {
+  const res = await fetch(`/api/conversations/${id}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || `delete failed (${res.status})`)
+  }
 }
 
 // ── RAG (base de conocimiento en Oracle 23ai) ──────────────────────────────
@@ -194,29 +239,30 @@ interface RagStreamHandlers {
   onDone?: (queryId: string) => void
 }
 
-/** Documento adjunto a la conversación que acompaña una pregunta RAG. */
-export interface RagAttachedDoc {
-  name: string
-  text: string
-}
-
 /**
  * Pregunta al asistente RAG. El backend embebe la consulta con
  * nomic-embed-text, recupera contexto de Oracle 23ai y genera con Mistral;
- * los documentos adjuntos a la conversación se inyectan como contexto
- * adicional. La respuesta llega en streaming SSE (sources → message* → done).
+ * los documentos adjuntos se inyectan como contexto adicional y, si hay
+ * conversación server-side, los últimos turnos dan memoria de seguimiento.
+ * La respuesta llega en streaming SSE (sources → message* → done).
  */
 export async function streamRagAsk(
   question: string,
   sessionId: string,
   documents: RagAttachedDoc[],
+  conversationId: string | undefined,
   handlers: RagStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
   let queryId = ''
   await streamSSE(
     '/api/rag/ask',
-    { question, sessionId, documents: documents.length > 0 ? documents : undefined },
+    {
+      question,
+      sessionId,
+      conversationId,
+      documents: documents.length > 0 ? documents : undefined,
+    },
     (event, data) => {
       switch (event) {
         case 'sources': {

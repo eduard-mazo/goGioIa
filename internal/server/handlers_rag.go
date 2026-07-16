@@ -155,12 +155,20 @@ func (s *Server) handleRagRetryDocument(w http.ResponseWriter, r *http.Request) 
 // incluir los documentos adjuntos a la conversación para usarlos como
 // contexto adicional junto a la base de conocimiento.
 type askRequest struct {
-	Question  string            `json:"question"`
-	Model     string            `json:"model,omitempty"`
-	SessionID string            `json:"sessionId,omitempty"`
-	UserID    string            `json:"userId,omitempty"`
-	Documents []rag.AttachedDoc `json:"documents,omitempty"`
+	Question       string            `json:"question"`
+	Model          string            `json:"model,omitempty"`
+	SessionID      string            `json:"sessionId,omitempty"`
+	UserID         string            `json:"userId,omitempty"`
+	ConversationID string            `json:"conversationId,omitempty"`
+	Documents      []rag.AttachedDoc `json:"documents,omitempty"`
 }
+
+// El historial que acompaña una pregunta RAG es corto y recortado: el grueso
+// de la ventana de contexto es para los chunks recuperados y los adjuntos.
+const (
+	ragHistoryWindow      = 6
+	maxRagHistoryMsgChars = 1500
+)
 
 // handleRagAsk responde una pregunta con RAG: embebe la consulta, recupera
 // contexto desde Oracle 23ai y genera con el LLM (Mistral por defecto),
@@ -183,11 +191,36 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	prep, err := s.rag.PrepareAsk(r.Context(), req.Question, req.Model, req.SessionID, req.UserID, req.Documents)
+	// Memoria de seguimiento: últimos turnos de la conversación persistida.
+	var convID []byte
+	var history []ollama.Message
+	if req.ConversationID != "" {
+		if id, err := store.ParseID(req.ConversationID); err == nil {
+			convID = id
+			if stored, err := s.store.ConversationMessages(r.Context(), id, ragHistoryWindow); err == nil {
+				for _, m := range stored {
+					history = append(history, ollama.Message{Role: m.Role, Content: m.Content})
+				}
+				history = trimHistory(history, ragHistoryWindow, maxRagHistoryMsgChars)
+			} else {
+				log.Printf("rag: no se pudo leer el historial: %v", err)
+			}
+		}
+	}
+
+	prep, err := s.rag.PrepareAsk(r.Context(), req.Question, req.Model, req.SessionID, req.UserID, req.Documents, history)
 	if err != nil {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()
 		return
+	}
+
+	// Persistencia best-effort del turno en la conversación.
+	if convID != nil {
+		if err := s.store.AppendMessage(r.Context(), convID, "user", strings.TrimSpace(req.Question), nil); err != nil {
+			log.Printf("rag: no se pudo persistir la pregunta: %v", err)
+			convID = nil
+		}
 	}
 
 	// Las fuentes van primero: la UI las muestra mientras el modelo escribe.
@@ -207,12 +240,19 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 
 	var answer strings.Builder
 	finish := func() {
+		if answer.Len() == 0 {
+			return
+		}
 		// La petición pudo abortarse: se persiste con contexto propio.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if answer.Len() > 0 {
-			if err := s.rag.FinishAsk(ctx, prep.QueryID, answer.String()); err != nil {
-				log.Printf("rag: no se pudo guardar la respuesta: %v", err)
+		if err := s.rag.FinishAsk(ctx, prep.QueryID, answer.String()); err != nil {
+			log.Printf("rag: no se pudo guardar la respuesta: %v", err)
+		}
+		if convID != nil {
+			queryID, _ := store.ParseID(prep.QueryID)
+			if err := s.store.AppendMessage(ctx, convID, "assistant", answer.String(), queryID); err != nil {
+				log.Printf("rag: no se pudo persistir la respuesta en la conversación: %v", err)
 			}
 		}
 	}

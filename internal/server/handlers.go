@@ -3,13 +3,18 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"goGioIa/internal/ollama"
 	"goGioIa/internal/rag"
+	"goGioIa/internal/store"
 )
 
 // maxUploadBytes caps the size of an uploaded PDF (32 MiB).
@@ -53,29 +58,118 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// chatRequest is the payload accepted from the frontend.
+// chatSystemPrompt fija el comportamiento del chat general (antes vivía en el
+// frontend; server-side aplica igual para cualquier cliente del API).
+const chatSystemPrompt = "Eres el asistente local de goGioIa. Responde en español, claro y al grano. " +
+	"Usa Markdown cuando ayude (listas, tablas y bloques de código con su lenguaje)."
+
+const (
+	// maxDocContextChars limita el texto de adjuntos inyectado por petición.
+	maxDocContextChars = 24000
+	// maxChatHistoryMsgChars recorta cada mensaje del historial en el prompt.
+	maxChatHistoryMsgChars = 6000
+)
+
+// chatRequest is the payload accepted from the frontend. Con conversationId
+// el historial sale de Oracle y la conversación se persiste; history es el
+// respaldo cuando la conversación no pudo crearse (Oracle caído).
 type chatRequest struct {
-	Model    string           `json:"model"`
-	Messages []ollama.Message `json:"messages"`
-	Options  map[string]any   `json:"options,omitempty"`
+	ConversationID string            `json:"conversationId,omitempty"`
+	Message        string            `json:"message"`
+	History        []ollama.Message  `json:"history,omitempty"`
+	Documents      []rag.AttachedDoc `json:"documents,omitempty"`
+	Model          string            `json:"model,omitempty"`
+	Options        map[string]any    `json:"options,omitempty"`
+}
+
+// docContext construye el mensaje de sistema con los adjuntos del chat.
+func docContext(docs []rag.AttachedDoc) string {
+	var b strings.Builder
+	b.WriteString("El usuario adjuntó los siguientes documentos. Úsalos como contexto al responder y cita el nombre del documento cuando sea relevante:\n")
+	budget := maxDocContextChars
+	for _, d := range docs {
+		if budget <= 0 {
+			break
+		}
+		text := d.Text
+		if len(text) > budget {
+			text = text[:budget] + "… (recortado)"
+		}
+		budget -= len(text)
+		fmt.Fprintf(&b, "\n# Documento: %s\n\n%s\n", d.Name, text)
+	}
+	return b.String()
+}
+
+// trimHistory filtra el historial a turnos user/assistant no vacíos, se queda
+// con los últimos `window` y recorta cada contenido a maxChars.
+func trimHistory(history []ollama.Message, window, maxChars int) []ollama.Message {
+	kept := make([]ollama.Message, 0, len(history))
+	for _, m := range history {
+		if (m.Role != "user" && m.Role != "assistant") || strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		if len(m.Content) > maxChars {
+			m.Content = m.Content[:maxChars] + "…"
+		}
+		kept = append(kept, m)
+	}
+	if window > 0 && len(kept) > window {
+		kept = kept[len(kept)-window:]
+	}
+	return kept
 }
 
 // handleChat proxies a chat conversation to Ollama and re-emits the streamed
-// tokens to the browser as Server-Sent Events.
+// tokens to the browser as Server-Sent Events. Si llega conversationId (y
+// Oracle está disponible), el contexto se construye server-side y el turno
+// queda persistido; si no, se degrada al historial enviado por el cliente.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	if len(req.Messages) == 0 {
-		http.Error(w, "messages must not be empty", http.StatusBadRequest)
+	question := strings.TrimSpace(req.Message)
+	if question == "" {
+		http.Error(w, "message must not be empty", http.StatusBadRequest)
 		return
 	}
 
 	model := req.Model
 	if model == "" {
 		model = s.cfg.ModelName
+	}
+
+	// Historial: de Oracle si hay conversación y el store está listo (Ready
+	// no bloquea: con Oracle caído el chat sigue con el respaldo del cliente).
+	history := req.History
+	var convID []byte
+	if req.ConversationID != "" && s.store.Ready() {
+		if id, err := store.ParseID(req.ConversationID); err == nil {
+			convID = id
+			if stored, err := s.store.ConversationMessages(r.Context(), id, s.cfg.HistoryWindow); err == nil {
+				history = history[:0]
+				for _, m := range stored {
+					history = append(history, ollama.Message{Role: m.Role, Content: m.Content})
+				}
+			} else {
+				log.Printf("chat: no se pudo leer el historial: %v", err)
+			}
+		}
+	}
+
+	msgs := []ollama.Message{{Role: "system", Content: chatSystemPrompt}}
+	if len(req.Documents) > 0 {
+		msgs = append(msgs, ollama.Message{Role: "system", Content: docContext(req.Documents)})
+	}
+	msgs = append(msgs, trimHistory(history, s.cfg.HistoryWindow, maxChatHistoryMsgChars)...)
+	msgs = append(msgs, ollama.Message{Role: "user", Content: question})
+
+	options := req.Options
+	if options == nil && len(req.Documents) > 0 {
+		// Con adjuntos hace falta más ventana o el modelo los descarta.
+		options = map[string]any{"num_ctx": 8192, "temperature": 0.3}
 	}
 
 	flusher, ok := w.(http.Flusher)
@@ -89,13 +183,33 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx)
 
-	body, err := s.ollama.Stream(r.Context(), model, req.Messages, req.Options)
+	body, err := s.ollama.Stream(r.Context(), model, msgs, options)
 	if err != nil {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()
 		return
 	}
 	defer body.Close()
+
+	// Persistencia best-effort: la conversación no debe romper el chat.
+	if convID != nil {
+		if err := s.store.AppendMessage(r.Context(), convID, "user", question, nil); err != nil {
+			log.Printf("chat: no se pudo persistir la pregunta: %v", err)
+			convID = nil // sin la pregunta guardada, no guardar la respuesta suelta
+		}
+	}
+	var answer strings.Builder
+	defer func() {
+		if convID == nil || answer.Len() == 0 {
+			return
+		}
+		// La petición pudo abortarse: se persiste con contexto propio.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := s.store.AppendMessage(ctx, convID, "assistant", answer.String(), nil); err != nil {
+			log.Printf("chat: no se pudo persistir la respuesta: %v", err)
+		}
+	}()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -114,6 +228,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if chunk.Message.Content != "" {
+			answer.WriteString(chunk.Message.Content)
 			writeSSE(w, "message", map[string]string{"content": chunk.Message.Content})
 			flusher.Flush()
 		}

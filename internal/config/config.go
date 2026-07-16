@@ -35,6 +35,8 @@ type Config struct {
 	OllamaMaxConcurrent int
 	// HistoryRetentionDays purges rag_queries older than this (0 disables).
 	HistoryRetentionDays int
+	// HistoryWindow is how many stored conversation messages feed the prompt.
+	HistoryWindow int
 
 	// ── Oracle 23ai (vector store) ─────────────────────────────────────────
 	OracleUser     string
@@ -61,6 +63,7 @@ const (
 	defaultRAGWorkers           = 2
 	defaultOllamaMaxConcurrent  = 2
 	defaultHistoryRetentionDays = 180
+	defaultHistoryWindow        = 12
 
 	defaultOracleUser     = ""
 	defaultOraclePassword = ""
@@ -86,6 +89,7 @@ func Load() Config {
 
 		OllamaMaxConcurrent:  envInt("OLLAMA_MAX_CONCURRENT", defaultOllamaMaxConcurrent),
 		HistoryRetentionDays: envIntAllowZero("RAG_HISTORY_RETENTION_DAYS", defaultHistoryRetentionDays),
+		HistoryWindow:        envInt("HISTORY_WINDOW", defaultHistoryWindow),
 
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),
