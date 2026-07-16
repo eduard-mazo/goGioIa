@@ -51,6 +51,10 @@ Environment=WEB_PORT=:8080
 Environment=OLLAMA_API=http://10.14.16.193:9091/api/chat
 Environment=MODEL_NAME=llama3
 
+# Depuración del RAG: registra cada chunk almacenado y cada fuente recuperada
+# (ver README «Depuración»). Actívalo solo mientras se diagnostica: es ruidoso.
+# Environment=RAG_DEBUG=1
+
 # App sin estado + binario estático en un puerto >1024 => no requiere
 # capacidades ni sistema de archivos escribible.
 ReadOnly=true
