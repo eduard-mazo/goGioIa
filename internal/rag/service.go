@@ -310,18 +310,23 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		return nil, fmt.Errorf("cargar plantilla de prompt: %w", err)
 	}
 
-	// 0. Cache semántica: solo preguntas sin contexto adicional (adjuntos o
-	// historial de seguimiento hacen la respuesta no reutilizable).
-	cacheable := s.cfg.RAGCache && len(attached) == 0 && len(attachmentIDs) == 0 && len(history) == 0
+	// 0. Cache semántica. Consultar y sembrar tienen reglas distintas:
+	// se SIEMBRA solo sin historial (la respuesta a una pregunta de
+	// seguimiento depende del contexto y no es reutilizable), así la cache
+	// solo contiene preguntas autocontenidas; por eso se puede CONSULTAR
+	// aunque haya historial — repetir una pregunta a mitad de conversación
+	// también resuelve al instante. Los adjuntos anulan ambas.
+	lookupOK := s.cfg.RAGCache && len(attached) == 0 && len(attachmentIDs) == 0
+	seedOK := lookupOK && len(history) == 0
 	var kbVersion int64
 	var qhash string
-	if cacheable {
+	if lookupOK {
 		if kbVersion, err = s.store.KBVersion(ctx); err != nil {
 			log.Printf("rag: sin versión de la base, cache desactivada: %v", err)
-			cacheable = false
+			lookupOK, seedOK = false, false
 		}
 	}
-	if cacheable {
+	if lookupOK {
 		qhash = questionHash(question)
 		if hit, err := s.store.LookupCacheExact(ctx, qhash, model, templateID, kbVersion); err != nil {
 			log.Printf("rag: lookup exacto de cache falló: %v", err)
@@ -338,7 +343,7 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 
 	// 1b. Cache semántica por cercanía: una pregunta equivalente ya
 	// respondida se sirve sin generar.
-	if cacheable {
+	if lookupOK {
 		if hit, err := s.store.LookupCacheSemantic(ctx, qVec, model, templateID, kbVersion, 1-s.cfg.RAGCacheSim); err != nil {
 			log.Printf("rag: lookup semántico de cache falló: %v", err)
 		} else if hit != nil {
@@ -385,7 +390,7 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		Model:    model,
 		Options:  map[string]any{"num_ctx": numCtx, "temperature": 0.2},
 	}
-	if cacheable {
+	if seedOK {
 		prep.cache = &cacheSeed{
 			hash: qhash, question: question, vec: qVec,
 			model: model, templateID: templateID, kbVersion: kbVersion,
