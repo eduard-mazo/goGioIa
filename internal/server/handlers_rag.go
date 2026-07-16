@@ -51,6 +51,48 @@ func (s *Server) handleRagHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRagDebug expone una radiografía de la base (documentos y su
+// chunking, cola, últimas consultas con su afinidad, cache) más la
+// configuración efectiva: es el volcado que se comparte para depurar el RAG
+// desde fuera de la red destino.
+func (s *Server) handleRagDebug(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.EnsureReady(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	snap, err := s.store.DebugSnapshot(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := map[string]any{
+		"snapshot": snap,
+		"config": map[string]any{
+			"embedModel":     s.cfg.EmbedModel,
+			"ragModel":       s.cfg.RAGModel,
+			"topK":           s.cfg.RAGTopK,
+			"chunkSize":      s.cfg.ChunkSize,
+			"chunkOverlap":   s.cfg.ChunkOverlap,
+			"embedBatch":     s.cfg.EmbedBatch,
+			"workers":        s.cfg.RAGWorkers,
+			"maxConcurrent":  s.cfg.OllamaMaxConcurrent,
+			"historyWindow":  s.cfg.HistoryWindow,
+			"cache":          s.cfg.RAGCache,
+			"cacheThreshold": s.cfg.RAGCacheSim,
+			"cacheTTLHours":  s.cfg.RAGCacheTTLHours,
+			"debug":          s.cfg.RAGDebug,
+		},
+	}
+	// Indentado: este JSON se copia y pega en texto plano para analizarlo.
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(append(b, '\n'))
+}
+
 // handleRagUpload recibe un documento (PDF o archivo de texto), lo registra
 // en Oracle y lanza el pipeline de entrenamiento (extracción → chunking →
 // embeddings) en segundo plano.

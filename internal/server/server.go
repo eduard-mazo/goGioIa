@@ -85,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 
 	// RAG: base de conocimiento en Oracle 23ai + asistente con retrieval.
 	mux.HandleFunc("GET /api/rag/health", s.handleRagHealth)
+	mux.HandleFunc("GET /api/rag/debug", s.handleRagDebug)
 	mux.HandleFunc("GET /api/rag/documents", s.handleRagDocuments)
 	mux.HandleFunc("POST /api/rag/documents", s.handleRagUpload)
 	mux.HandleFunc("DELETE /api/rag/documents/{id}", s.handleRagDeleteDocument)

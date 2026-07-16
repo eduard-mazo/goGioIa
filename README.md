@@ -60,6 +60,7 @@ goGioIa/
 | DELETE | `/api/conversations/{id}/attachments/{attId}` | Remove a stored attachment       |
 | POST   | `/api/pdf`                | Multipart PDF/text upload → extracted text (JSON) |
 | GET    | `/api/rag/health`         | Oracle 23ai status + knowledge-base stats        |
+| GET    | `/api/rag/debug`          | Diagnostic snapshot: docs & chunking, jobs, last queries, cache |
 | GET    | `/api/rag/documents`      | List ingested documents (status, chunks, pages)  |
 | POST   | `/api/rag/documents`      | Upload a document → async ingest into the vector store |
 | DELETE | `/api/rag/documents/{id}` | Remove a document and its vectors                |
@@ -143,6 +144,16 @@ migraciones versionadas (`rag_schema_migrations`, ver
 `vector_memory_size`; si aun así no puede crearse, la búsqueda funciona en
 modo exacto.
 
+**Depuración** — cada ingesta deja en el log un resumen de su chunking
+(`"X.pdf" ingerido (N páginas, M chunks, C chars)…`) y cada consulta una línea
+con lo recuperado (`consulta "…" → K fuentes (similitud a–b)`); una consulta
+con `0 fuentes` es la firma de una respuesta sin contexto. Con `RAG_DEBUG=1`
+se registra además cada chunk almacenado y cada fuente recuperada (con
+extracto). `GET /api/rag/debug` devuelve una radiografía completa en JSON
+—documentos y forma de sus chunks, cola, últimas consultas con su afinidad,
+cache por generación y configuración efectiva— pensada para copiar y pegar al
+depurar sin acceso a la red destino.
+
 ## Configuration
 
 Defaults live in `internal/config/config.go` and can be overridden by env vars:
@@ -165,6 +176,7 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `RAG_CACHE`         | `1`                                 | Semantic answer cache (0 disables)   |
 | `RAG_CACHE_THRESHOLD` | `0.97`                            | Min. cosine similarity to reuse an answer |
 | `RAG_CACHE_TTL_HOURS` | `168`                             | Cached answers expire after this     |
+| `RAG_DEBUG`          | `false`                            | Verbose logs: every stored chunk and every retrieved source |
 | `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
 | `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
 | `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |

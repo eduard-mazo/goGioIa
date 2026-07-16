@@ -139,6 +139,7 @@ func (s *Service) runIngest(docID []byte, fileName string, data []byte) error {
 	if err := s.store.ResetDocumentContent(ctx, docID); err != nil {
 		return fail("limpiar contenido previo", err)
 	}
+	started := time.Now()
 
 	// 1. Extracción de texto (los PDF por página, para citar fuentes; los
 	// archivos de texto como una sola página sin numerar).
@@ -163,11 +164,18 @@ func (s *Service) runIngest(docID []byte, fileName string, data []byte) error {
 	if len(chunks) == 0 {
 		return fail("chunking", fmt.Errorf("el documento no produjo fragmentos de texto"))
 	}
+	if s.cfg.RAGDebug {
+		for _, c := range chunks {
+			log.Printf("rag[debug]: %q chunk %d (pág %d, %d chars): %s",
+				fileName, c.Index, c.Page, len(c.Text), preview(c.Text, 80))
+		}
+	}
 	if err := s.store.SetDocumentStatus(ctx, docID, store.StatusChunked, ""); err != nil {
 		return fail("actualizar estado", err)
 	}
 
 	// 3. Embeddings por lotes + inserción en el vector store.
+	embedStart := time.Now()
 	batchSize := s.cfg.EmbedBatch
 	for from := 0; from < len(chunks); from += batchSize {
 		batch := chunks[from:min(from+batchSize, len(chunks))]
@@ -200,8 +208,23 @@ func (s *Service) runIngest(docID []byte, fileName string, data []byte) error {
 	if err := s.store.BumpKBVersion(ctx); err != nil {
 		log.Printf("rag: no se pudo incrementar la versión de la base: %v", err)
 	}
-	log.Printf("rag: %q ingerido (%d páginas, %d chunks)", fileName, pageCount, len(chunks))
+	totalChars := 0
+	for _, c := range chunks {
+		totalChars += len(c.Text)
+	}
+	log.Printf("rag: %q ingerido (%d páginas, %d chunks, %d chars) en %s [embeddings %s]",
+		fileName, pageCount, len(chunks), totalChars,
+		time.Since(started).Round(time.Second), time.Since(embedStart).Round(time.Second))
 	return nil
+}
+
+// preview compacta un texto para el log: espacios colapsados y recorte.
+func preview(s string, maxRunes int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[:maxRunes]) + "…"
+	}
+	return s
 }
 
 // embedBatch vectoriza un lote y, si el lote completo falla pese a los
@@ -342,10 +365,12 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	}
 
 	// 1. Embedding de la consulta (mismo espacio vectorial que los chunks).
+	embedStart := time.Now()
 	qVec, err := s.embedQueryCached(ctx, question)
 	if err != nil {
 		return nil, fmt.Errorf("vectorizar la pregunta: %w", err)
 	}
+	embedDur := time.Since(embedStart)
 
 	// 1b. Cache semántica por cercanía: una pregunta equivalente ya
 	// respondida se sirve sin generar.
@@ -358,9 +383,26 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	}
 
 	// 2. Retrieval por similitud coseno.
+	searchStart := time.Now()
 	sources, err := s.store.SearchChunks(ctx, qVec, s.cfg.RAGTopK)
 	if err != nil {
 		return nil, fmt.Errorf("búsqueda vectorial: %w", err)
+	}
+	// El diagnóstico clave de una respuesta «sin contexto» es esta línea:
+	// cuántas fuentes se recuperaron y con qué afinidad.
+	if len(sources) == 0 {
+		log.Printf("rag: consulta %q → 0 fuentes: la respuesta irá sin contexto de la base", preview(question, 60))
+	} else {
+		log.Printf("rag: consulta %q → %d fuentes (similitud %.2f–%.2f) [embed %s, búsqueda %s]",
+			preview(question, 60), len(sources),
+			sources[len(sources)-1].Similarity, sources[0].Similarity,
+			embedDur.Round(time.Millisecond), time.Since(searchStart).Round(time.Millisecond))
+	}
+	if s.cfg.RAGDebug {
+		for i, r := range sources {
+			log.Printf("rag[debug]: fuente %d: %s pág %d sim %.3f: %s",
+				i+1, r.FileName, r.PageNumber, r.Similarity, preview(r.Text, 80))
+		}
 	}
 
 	// 2b. Anexos referenciados por id: pequeños completos, grandes vía

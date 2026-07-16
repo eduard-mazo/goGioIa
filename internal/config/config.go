@@ -44,6 +44,9 @@ type Config struct {
 	RAGCacheSim float64
 	// RAGCacheTTLHours expires cached answers after this many hours.
 	RAGCacheTTLHours int
+	// RAGDebug logs verbose diagnostics: every chunk stored at ingest and
+	// every retrieved source per query (RAG_DEBUG=1 enables).
+	RAGDebug bool
 
 	// ── Oracle 23ai (vector store) ─────────────────────────────────────────
 	OracleUser     string
@@ -102,6 +105,7 @@ func Load() Config {
 		RAGCache:             envBool("RAG_CACHE", true),
 		RAGCacheSim:          envFloat("RAG_CACHE_THRESHOLD", defaultRAGCacheSim),
 		RAGCacheTTLHours:     envInt("RAG_CACHE_TTL_HOURS", defaultRAGCacheTTLHours),
+		RAGDebug:             envBool("RAG_DEBUG", false),
 
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),

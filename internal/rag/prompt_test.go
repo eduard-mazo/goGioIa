@@ -62,3 +62,14 @@ func TestQuestionHashNormalizes(t *testing.T) {
 		t.Error("preguntas distintas no deben colisionar")
 	}
 }
+
+func TestPreview(t *testing.T) {
+	got := preview("  hola \n\n  mundo   con\tespacios  ", 80)
+	if got != "hola mundo con espacios" {
+		t.Fatalf("preview normaliza mal: %q", got)
+	}
+	got = preview("áéíóú áéíóú", 7)
+	if got != "áéíóú á…" {
+		t.Fatalf("preview recorta mal (runas): %q", got)
+	}
+}
