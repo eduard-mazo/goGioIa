@@ -396,7 +396,10 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		Model:    model,
 		Options:  map[string]any{"num_ctx": numCtx, "temperature": 0.2},
 	}
-	if seedOK {
+	// Sin fuentes recuperadas la respuesta es un «no tengo información»:
+	// cachearla congelaría ese fallo hasta el TTL o el próximo cambio de la
+	// base; mejor regenerarla cada vez por si el retrieval se recupera.
+	if seedOK && len(sources) > 0 {
 		prep.cache = &cacheSeed{
 			hash: qhash, question: question, vec: qVec,
 			model: model, templateID: templateID, kbVersion: kbVersion,

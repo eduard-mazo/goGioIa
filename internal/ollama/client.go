@@ -41,14 +41,14 @@ type ChatChunk struct {
 type Client struct {
 	endpoint string
 	http     *http.Client
-	// sem limita las generaciones simultáneas: el host Ollama es modesto y
-	// demasiados chats concurrentes degradan o tumban el runner. nil = sin
-	// límite.
+	// sem limita las peticiones simultáneas al host (generación y
+	// embeddings): el host Ollama es modesto y demasiadas llamadas
+	// concurrentes degradan o tumban el runner. nil = sin límite.
 	sem chan struct{}
 }
 
 // New returns a Client for the given fully-qualified chat endpoint URL.
-// maxConcurrent > 0 caps simultaneous generation (Stream) calls.
+// maxConcurrent > 0 caps simultaneous Ollama calls (Stream and Embed).
 func New(endpoint string, maxConcurrent int) *Client {
 	var sem chan struct{}
 	if maxConcurrent > 0 {

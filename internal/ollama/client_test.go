@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -90,5 +91,60 @@ func TestReleaseCloserIdempotent(t *testing.T) {
 	// El hueco debe poder adquirirse de nuevo sin bloqueo.
 	if _, err := c.acquire(context.Background()); err != nil {
 		t.Fatalf("re-adquirir tras liberar: %v", err)
+	}
+}
+
+// TestEmbedRespectsSemaphore: los embeddings comparten el semáforo con la
+// generación; con el hueco ocupado por un stream, Embed no llega al servidor
+// hasta que el stream se cierra.
+func TestEmbedRespectsSemaphore(t *testing.T) {
+	streamIn := make(chan struct{}, 1)
+	embedIn := make(chan struct{}, 1)
+	proceed := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/api/embed") {
+			embedIn <- struct{}{}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2]]}`))
+			return
+		}
+		streamIn <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-proceed
+	}))
+	defer srv.Close()
+	defer close(proceed)
+
+	c := New(srv.URL+"/api/chat", 1)
+	ctx := context.Background()
+
+	body, err := c.Stream(ctx, "m", []Message{{Role: "user", Content: "hola"}}, nil)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	<-streamIn
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.EmbedOne(ctx, "m", "texto")
+		done <- err
+	}()
+
+	select {
+	case <-embedIn:
+		t.Fatal("Embed entró al servidor con el semáforo lleno")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	body.Close()
+	select {
+	case <-embedIn:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Embed no entró tras liberar el semáforo")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("EmbedOne: %v", err)
 	}
 }

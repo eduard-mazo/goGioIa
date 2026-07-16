@@ -84,6 +84,16 @@ func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]
 // otro intento; los errores del API (payload inválido, modelo inexistente…)
 // son definitivos.
 func (c *Client) embedOnce(ctx context.Context, model string, inputs []string, body []byte) (vecs [][]float32, retryable bool, err error) {
+	// Mismo semáforo que la generación: los embeddings de los trabajos de
+	// fondo (ingesta, anexos) no deben saturar el host Ollama mientras un
+	// usuario espera una respuesta. Se toma por intento: durante la pausa de
+	// un reintento el hueco queda libre para el tráfico interactivo.
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
+
 	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
 	defer cancel()
 
