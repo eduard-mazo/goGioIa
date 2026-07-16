@@ -104,6 +104,8 @@ export interface ChatPayload {
   message: string
   history?: ApiMessage[]
   documents?: RagAttachedDoc[]
+  /** Ids de anexos ya subidos a la conversación (contenido server-side). */
+  attachments?: string[]
   model?: string
   /** Model params, e.g. { num_ctx: 8192, temperature: 0.1 }. */
   options?: Record<string, unknown>
@@ -160,6 +162,36 @@ export async function createConversation(
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.error || `create failed (${res.status})`)
   return data.id as string
+}
+
+/**
+ * Sube un anexo a la conversación: el texto extraído queda en Oracle y las
+ * peticiones lo referencian por id (los grandes se vectorizan en la cola).
+ */
+export async function uploadAttachment(
+  conversationId: string,
+  file: File,
+): Promise<{ id: string; fileName: string; chars: number }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/conversations/${conversationId}/attachments`, {
+    method: 'POST',
+    body: form,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `upload failed (${res.status})`)
+  return data as { id: string; fileName: string; chars: number }
+}
+
+/** Quita un anexo persistido de la conversación. */
+export async function deleteAttachment(conversationId: string, attachmentId: string): Promise<void> {
+  const res = await fetch(`/api/conversations/${conversationId}/attachments/${attachmentId}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || `delete failed (${res.status})`)
+  }
 }
 
 /** Elimina la conversación persistida (mensajes incluidos). */
@@ -239,30 +271,32 @@ interface RagStreamHandlers {
   onDone?: (queryId: string) => void
 }
 
+/** Petición al asistente RAG. */
+export interface RagAskPayload {
+  question: string
+  sessionId: string
+  conversationId?: string
+  documents?: RagAttachedDoc[]
+  /** Ids de anexos ya subidos a la conversación (contenido server-side). */
+  attachments?: string[]
+}
+
 /**
  * Pregunta al asistente RAG. El backend embebe la consulta con
  * nomic-embed-text, recupera contexto de Oracle 23ai y genera con Mistral;
- * los documentos adjuntos se inyectan como contexto adicional y, si hay
- * conversación server-side, los últimos turnos dan memoria de seguimiento.
- * La respuesta llega en streaming SSE (sources → message* → done).
+ * los anexos se inyectan como contexto adicional y, si hay conversación
+ * server-side, los últimos turnos dan memoria de seguimiento. La respuesta
+ * llega en streaming SSE (sources → message* → done).
  */
 export async function streamRagAsk(
-  question: string,
-  sessionId: string,
-  documents: RagAttachedDoc[],
-  conversationId: string | undefined,
+  payload: RagAskPayload,
   handlers: RagStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
   let queryId = ''
   await streamSSE(
     '/api/rag/ask',
-    {
-      question,
-      sessionId,
-      conversationId,
-      documents: documents.length > 0 ? documents : undefined,
-    },
+    payload,
     (event, data) => {
       switch (event) {
         case 'sources': {

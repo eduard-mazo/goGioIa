@@ -72,9 +72,11 @@ func (s *Store) EnsureReady(ctx context.Context) error {
 	if err := s.migrate(ctx); err != nil {
 		return fmt.Errorf("migrar esquema: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, vectorIndexDDL); err != nil && !isTolerable(err) {
-		// Sin índice la búsqueda vectorial sigue funcionando (exacta).
-		log.Printf("aviso: no se pudo crear el índice vectorial: %v", err)
+	for _, ddl := range []string{vectorIndexDDL, attachVectorIndexDDL} {
+		if _, err := s.db.ExecContext(ctx, ddl); err != nil && !isTolerable(err) {
+			// Sin índice la búsqueda vectorial sigue funcionando (exacta).
+			log.Printf("aviso: no se pudo crear un índice vectorial: %v", err)
+		}
 	}
 	if err := s.seedTemplate(ctx); err != nil {
 		return fmt.Errorf("sembrar plantilla de prompt: %w", err)

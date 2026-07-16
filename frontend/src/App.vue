@@ -8,8 +8,7 @@ import StatusPill from './components/StatusPill.vue'
 import ModelSelect from './components/ModelSelect.vue'
 import KnowledgeBase from './components/KnowledgeBase.vue'
 import { useChat } from './composables/useChat'
-import { fetchConfig, fetchHealth, fetchModels, uploadPdf } from './lib/api'
-import { uid } from './lib/utils'
+import { fetchConfig, fetchHealth, fetchModels } from './lib/api'
 import { t } from './i18n'
 import type { HealthStatus, ModelsResponse } from './types'
 
@@ -29,7 +28,7 @@ const {
   newConversation,
   selectConversation,
   deleteConversation,
-  addDoc,
+  attachFile,
   removeDoc,
 } = useChat()
 
@@ -166,8 +165,9 @@ async function onAttach(file: File) {
   uploading.value = true
   uploadError.value = null
   try {
-    const res = await uploadPdf(file)
-    addDoc({ id: uid(), filename: res.filename, chars: res.chars, text: res.text })
+    // Con Oracle el anexo queda persistido y viaja por referencia; sin él,
+    // respaldo inline (useChat decide).
+    await attachFile(file)
   } catch (e) {
     uploadError.value = e instanceof Error ? e.message : t.doc.uploadFailed
   } finally {

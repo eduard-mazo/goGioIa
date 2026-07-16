@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -87,6 +88,66 @@ func (s *Server) handleConversationGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+}
+
+// handleAttachmentUpload guarda un anexo (PDF o texto) en la conversación:
+// el texto extraído queda en Oracle y los prompts lo referencian por id, sin
+// reenviarlo en cada petición. Los anexos grandes se vectorizan en la cola.
+func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "archivo demasiado grande o formulario inválido"})
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "falta el campo 'file'"})
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no se pudo leer el archivo"})
+		return
+	}
+
+	id, chars, err := s.rag.IngestAttachment(r.Context(), r.PathValue("id"), header.Filename, data)
+	if err != nil {
+		status := http.StatusUnprocessableEntity
+		if strings.Contains(err.Error(), "ORA-02291") { // FK: conversación inexistente
+			status = http.StatusNotFound
+			err = errors.New("conversación no encontrada")
+		} else if strings.Contains(err.Error(), "oracle no disponible") {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":       id,
+		"fileName": header.Filename,
+		"chars":    chars,
+	})
+}
+
+// handleAttachmentDelete quita un anexo de la conversación.
+func (s *Server) handleAttachmentDelete(w http.ResponseWriter, r *http.Request) {
+	err := s.rag.DeleteAttachment(r.Context(), r.PathValue("id"), r.PathValue("attId"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "anexo no encontrado"})
+			return
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // handleConversationDelete elimina una conversación y sus mensajes.

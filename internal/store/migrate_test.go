@@ -42,3 +42,12 @@ func TestIsTolerable(t *testing.T) {
 		t.Error("isTolerable(nil) debe ser false")
 	}
 }
+
+func TestBindList(t *testing.T) {
+	if got := bindList(2, 3); got != ":2, :3, :4" {
+		t.Errorf("bindList(2,3) = %q", got)
+	}
+	if got := bindList(1, 1); got != ":1" {
+		t.Errorf("bindList(1,1) = %q", got)
+	}
+}

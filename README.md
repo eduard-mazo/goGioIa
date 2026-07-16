@@ -56,6 +56,8 @@ goGioIa/
 | GET    | `/api/conversations`      | List conversations for a `sessionId`             |
 | GET    | `/api/conversations/{id}` | Stored messages of a conversation                |
 | DELETE | `/api/conversations/{id}` | Delete a conversation and its messages           |
+| POST   | `/api/conversations/{id}/attachments` | Upload an attachment (stored server-side) |
+| DELETE | `/api/conversations/{id}/attachments/{attId}` | Remove a stored attachment       |
 | POST   | `/api/pdf`                | Multipart PDF/text upload → extracted text (JSON) |
 | GET    | `/api/rag/health`         | Oracle 23ai status + knowledge-base stats        |
 | GET    | `/api/rag/documents`      | List ingested documents (status, chunks, pages)  |
@@ -101,10 +103,13 @@ Ollama se limitan con `OLLAMA_MAX_CONCURRENT`.
 recupera los `RAG_TOP_K` chunks más afines con
 `VECTOR_DISTANCE(embedding, :q, COSINE)`, construye el prompt con la plantilla
 activa de `prompt_templates` y genera la respuesta con **Mistral** en
-streaming. Los documentos adjuntos a la conversación con el clip también
-viajan en la petición (`documents`) y se inyectan en el contexto como
-`[Adjunto N]`, de modo que el modo RAG puede razonar a la vez sobre la base
-de conocimiento y sobre archivos puntuales sin ingerirlos.
+streaming. Los adjuntos del clip se suben **una sola vez** a la conversación
+(`conversation_attachments`) y las peticiones los referencian por id
+(`attachments`), sin reenviar su texto: los pequeños (≤ 8k caracteres) se
+inyectan completos como `[Adjunto N]` y los grandes se trocean y vectorizan
+en la cola (`attachment_chunks`), recuperando en cada pregunta solo los
+fragmentos afines. Si Oracle no está disponible, el clip degrada al envío
+inline de siempre (`documents`).
 
 **Contexto de conversación** — el primer mensaje crea (de forma perezosa) una
 conversación server-side (`conversations` / `conversation_messages`); a partir

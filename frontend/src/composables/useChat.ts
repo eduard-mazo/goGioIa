@@ -1,10 +1,13 @@
 import { computed, ref } from 'vue'
 import {
   createConversation as createServerConversation,
+  deleteAttachment as deleteServerAttachment,
   deleteServerConversation,
   sendRagFeedback,
   streamChat,
   streamRagAsk,
+  uploadAttachment,
+  uploadPdf,
 } from '@/lib/api'
 import { uid } from '@/lib/utils'
 import type { AttachedDoc, ChatMessage, Conversation } from '@/types'
@@ -97,9 +100,16 @@ export function useChat() {
 
   const isEmpty = computed(() => messages.value.length === 0)
 
-  /** Adjuntos de la conversación en el formato que consume el backend. */
-  function docsPayload() {
-    return docs.value.map((d) => ({ name: d.filename, text: d.text.slice(0, MAX_DOC_CHARS) }))
+  /** Ids de anexos persistidos en Oracle (viajan por referencia). */
+  function attachmentIds(): string[] {
+    return docs.value.filter((d) => d.attachmentId).map((d) => d.attachmentId as string)
+  }
+
+  /** Adjuntos inline (respaldo sin Oracle) con su texto completo. */
+  function inlineDocs() {
+    return docs.value
+      .filter((d) => !d.attachmentId)
+      .map((d) => ({ name: d.filename, text: d.text.slice(0, MAX_DOC_CHARS) }))
   }
 
   /**
@@ -166,13 +176,16 @@ export function useChat() {
 
       if (rag) {
         // Asistente RAG: el backend recupera contexto de Oracle 23ai y
-        // genera con Mistral; los adjuntos viajan como contexto adicional y
-        // la conversación server-side aporta memoria de seguimiento.
+        // genera con Mistral; los anexos viajan por referencia (o inline como
+        // respaldo) y la conversación server-side aporta memoria de seguimiento.
         await streamRagAsk(
-          trimmed,
-          sessionId(),
-          docsPayload(),
-          serverId,
+          {
+            question: trimmed,
+            sessionId: sessionId(),
+            conversationId: serverId,
+            documents: inlineDocs(),
+            attachments: attachmentIds(),
+          },
           {
             onSources: (queryId, sources) => {
               const target = convMessages.find((m) => m.id === assistantMsg.id)
@@ -199,7 +212,8 @@ export function useChat() {
             conversationId: serverId,
             message: trimmed,
             history,
-            documents: docsPayload(),
+            documents: inlineDocs(),
+            attachments: attachmentIds(),
             model: model.value,
           },
           { onToken },
@@ -244,8 +258,29 @@ export function useChat() {
     touch(activeConv())
   }
 
+  /**
+   * Sube un adjunto: si hay conversación server-side el texto queda en
+   * Oracle y solo viaja el id en cada prompt; si no (Oracle caído), respaldo
+   * inline como antes.
+   */
+  async function attachFile(file: File) {
+    const conv = activeConv()
+    await ensureServerConversation(conv, file.name, ragMode.value)
+    if (conv?.serverId) {
+      const res = await uploadAttachment(conv.serverId, file)
+      addDoc({ id: uid(), attachmentId: res.id, filename: res.fileName, chars: res.chars, text: '' })
+      return
+    }
+    const res = await uploadPdf(file)
+    addDoc({ id: uid(), filename: res.filename, chars: res.chars, text: res.text })
+  }
+
   function removeDoc(id: string) {
     const conv = activeConv()
+    const doc = docs.value.find((d) => d.id === id)
+    if (doc?.attachmentId && conv?.serverId) {
+      void deleteServerAttachment(conv.serverId, doc.attachmentId).catch(() => {})
+    }
     docs.value = docs.value.filter((d) => d.id !== id)
     if (conv) conv.docs = docs.value
     touch(conv)
@@ -363,6 +398,7 @@ export function useChat() {
     selectConversation,
     deleteConversation,
     addDoc,
+    attachFile,
     removeDoc,
   }
 }

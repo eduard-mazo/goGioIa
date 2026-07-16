@@ -161,6 +161,8 @@ type askRequest struct {
 	UserID         string            `json:"userId,omitempty"`
 	ConversationID string            `json:"conversationId,omitempty"`
 	Documents      []rag.AttachedDoc `json:"documents,omitempty"`
+	// Attachments son ids de anexos ya subidos a la conversación.
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 // El historial que acompaña una pregunta RAG es corto y recortado: el grueso
@@ -208,7 +210,7 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	prep, err := s.rag.PrepareAsk(r.Context(), req.Question, req.Model, req.SessionID, req.UserID, req.Documents, history)
+	prep, err := s.rag.PrepareAsk(r.Context(), req.Question, req.Model, req.SessionID, req.UserID, req.Documents, req.Attachments, history)
 	if err != nil {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()

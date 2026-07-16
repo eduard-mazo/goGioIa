@@ -59,13 +59,13 @@ func (s *Service) worker(ctx context.Context, id int) {
 	}
 }
 
-// drainQueue procesa trabajos de ingesta hasta que la cola queda vacía.
+// drainQueue procesa trabajos pendientes hasta que la cola queda vacía.
 func (s *Service) drainQueue(ctx context.Context, workerID int) {
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		job, err := s.store.ClaimJob(ctx, store.JobIngestDocument)
+		job, err := s.store.ClaimJob(ctx, store.JobIngestDocument, store.JobEmbedAttachment)
 		if err != nil {
 			log.Printf("rag: worker %d no pudo reclamar trabajo: %v", workerID, err)
 			return
@@ -73,12 +73,17 @@ func (s *Service) drainQueue(ctx context.Context, workerID int) {
 		if job == nil {
 			return
 		}
-		s.runJob(ctx, workerID, job)
+		switch job.Type {
+		case store.JobEmbedAttachment:
+			s.runAttachmentJob(ctx, workerID, job)
+		default:
+			s.runIngestJob(ctx, workerID, job)
+		}
 	}
 }
 
-// runJob ejecuta un trabajo de ingesta reclamado y cierra su resultado.
-func (s *Service) runJob(ctx context.Context, workerID int, job *store.Job) {
+// runIngestJob ejecuta un trabajo de ingesta reclamado y cierra su resultado.
+func (s *Service) runIngestJob(ctx context.Context, workerID int, job *store.Job) {
 	docHex := hex.EncodeToString(job.PayloadID)
 	fileName, data, err := s.store.LoadDocumentFile(ctx, job.PayloadID)
 	if err != nil {
@@ -105,6 +110,20 @@ func (s *Service) runJob(ctx context.Context, workerID int, job *store.Job) {
 		if err := s.store.DeleteDocumentFile(ctx, job.PayloadID); err != nil {
 			log.Printf("rag: no se pudo liberar el archivo de %q: %v", fileName, err)
 		}
+	}
+}
+
+// runAttachmentJob vectoriza un anexo grande y cierra su resultado.
+func (s *Service) runAttachmentJob(ctx context.Context, workerID int, job *store.Job) {
+	log.Printf("rag: worker %d vectoriza anexo %s (intento %d)",
+		workerID, hex.EncodeToString(job.PayloadID), job.Attempts)
+	msg := ""
+	if err := s.runEmbedAttachment(job.PayloadID); err != nil {
+		log.Printf("rag: vectorización de anexo falló: %v", err)
+		msg = err.Error()
+	}
+	if err := s.store.FinishJob(ctx, job.ID, msg); err != nil {
+		log.Printf("rag: no se pudo cerrar el trabajo del anexo: %v", err)
 	}
 }
 

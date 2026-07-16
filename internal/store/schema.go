@@ -94,6 +94,12 @@ const vectorIndexDDL = `CREATE VECTOR INDEX idx_chunks_embedding ON document_chu
   DISTANCE COSINE
   WITH TARGET ACCURACY 95`
 
+// Índice vectorial de los chunks de anexos (mismo criterio best-effort).
+const attachVectorIndexDDL = `CREATE VECTOR INDEX idx_attach_embedding ON attachment_chunks(embedding)
+  ORGANIZATION NEIGHBOR PARTITIONS
+  DISTANCE COSINE
+  WITH TARGET ACCURACY 95`
+
 // defaultTemplateName es la plantilla de prompt sembrada en el primer arranque.
 const defaultTemplateName = "rag-default"
 

@@ -137,6 +137,38 @@ var migrations = []migration{
 			`CREATE INDEX idx_msg_query ON conversation_messages(query_id)`,
 		},
 	},
+	{
+		version:     5,
+		description: "anexos de conversación por referencia (+ chunks vectorizados)",
+		statements: []string{
+			// El texto extraído del anexo se guarda una vez; los prompts lo
+			// referencian por id en vez de reenviarlo en cada petición.
+			`CREATE TABLE conversation_attachments (
+			    attachment_id   RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+			    conversation_id RAW(16) NOT NULL
+			                    REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+			    file_name       VARCHAR2(500 CHAR) NOT NULL,
+			    file_hash       VARCHAR2(64) NOT NULL,
+			    mime_type       VARCHAR2(100),
+			    char_count      NUMBER,
+			    content         CLOB NOT NULL,
+			    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
+			    CONSTRAINT uq_conv_attach UNIQUE (conversation_id, file_hash)
+			)`,
+			// Anexos grandes: troceados y vectorizados para recuperar solo lo
+			// relevante en cada pregunta (mismo retrieval que la base de
+			// conocimiento, acotado por attachment_id).
+			`CREATE TABLE attachment_chunks (
+			    chunk_id      RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+			    attachment_id RAW(16) NOT NULL
+			                  REFERENCES conversation_attachments(attachment_id) ON DELETE CASCADE,
+			    chunk_index   NUMBER NOT NULL,
+			    chunk_text    CLOB NOT NULL,
+			    embedding     VECTOR(768, FLOAT32),
+			    CONSTRAINT uq_attach_chunk UNIQUE (attachment_id, chunk_index)
+			)`,
+		},
+	},
 }
 
 // tolerableORA son los errores «ya existe / ya aplicado». El DDL de Oracle

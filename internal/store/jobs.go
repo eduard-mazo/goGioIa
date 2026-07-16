@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	go_ora "github.com/sijms/go-ora/v2"
@@ -10,7 +11,8 @@ import (
 
 // Tipos de trabajo de processing_jobs.
 const (
-	JobIngestDocument = "ingest_document"
+	JobIngestDocument  = "ingest_document"
+	JobEmbedAttachment = "embed_attachment"
 )
 
 // ErrNoSourceFile señala que el archivo original ya no está en document_files
@@ -20,33 +22,47 @@ var ErrNoSourceFile = errors.New("el archivo original ya no está disponible; vu
 // Job es un trabajo reclamado de la cola.
 type Job struct {
 	ID        []byte
+	Type      string
 	PayloadID []byte
 	Attempts  int
 }
 
-// ClaimJob toma el trabajo QUEUED más antiguo del tipo dado y lo marca
+// EnqueueJob inserta un trabajo QUEUED en la cola.
+func (s *Store) EnqueueJob(ctx context.Context, jobType string, payloadID []byte) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO processing_jobs (job_id, job_type, payload_id)
+		VALUES (:1, :2, :3)`,
+		newID(), jobType, payloadID)
+	return err
+}
+
+// ClaimJob toma el trabajo QUEUED más antiguo de los tipos dados y lo marca
 // RUNNING. Devuelve nil si la cola está vacía. FOR UPDATE SKIP LOCKED evita
 // que dos workers reclamen el mismo trabajo.
-func (s *Store) ClaimJob(ctx context.Context, jobType string) (*Job, error) {
+func (s *Store) ClaimJob(ctx context.Context, jobTypes ...string) (*Job, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.QueryContext(ctx, `
-		SELECT job_id, payload_id, attempts
+	args := make([]any, len(jobTypes))
+	for i, t := range jobTypes {
+		args[i] = t
+	}
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT job_id, job_type, payload_id, attempts
 		FROM processing_jobs
-		WHERE status = 'QUEUED' AND job_type = :1
+		WHERE status = 'QUEUED' AND job_type IN (%s)
 		ORDER BY created_at
-		FOR UPDATE SKIP LOCKED`, jobType)
+		FOR UPDATE SKIP LOCKED`, bindList(1, len(jobTypes))), args...)
 	if err != nil {
 		return nil, err
 	}
 	var job *Job
 	if rows.Next() {
 		job = &Job{}
-		if err := rows.Scan(&job.ID, &job.PayloadID, &job.Attempts); err != nil {
+		if err := rows.Scan(&job.ID, &job.Type, &job.PayloadID, &job.Attempts); err != nil {
 			rows.Close()
 			return nil, err
 		}

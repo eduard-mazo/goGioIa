@@ -80,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/conversations", s.handleConversationsList)
 	mux.HandleFunc("GET /api/conversations/{id}", s.handleConversationGet)
 	mux.HandleFunc("DELETE /api/conversations/{id}", s.handleConversationDelete)
+	mux.HandleFunc("POST /api/conversations/{id}/attachments", s.handleAttachmentUpload)
+	mux.HandleFunc("DELETE /api/conversations/{id}/attachments/{attId}", s.handleAttachmentDelete)
 
 	// RAG: base de conocimiento en Oracle 23ai + asistente con retrieval.
 	mux.HandleFunc("GET /api/rag/health", s.handleRagHealth)

@@ -241,7 +241,7 @@ type Prepared struct {
 // consulta (rag_queries + rag_retrieved_chunks). history son turnos previos
 // de la conversación: dan memoria de seguimiento («¿y en qué página está?»)
 // y van como mensajes normales antes del prompt con el contexto.
-func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, userID string, attached []AttachedDoc, history []ollama.Message) (*Prepared, error) {
+func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, userID string, attached []AttachedDoc, attachmentIDs []string, history []ollama.Message) (*Prepared, error) {
 	if err := s.store.EnsureReady(ctx); err != nil {
 		return nil, err
 	}
@@ -264,6 +264,10 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	if err != nil {
 		return nil, fmt.Errorf("búsqueda vectorial: %w", err)
 	}
+
+	// 2b. Anexos referenciados por id: pequeños completos, grandes vía
+	// retrieval con el mismo embedding de la pregunta.
+	attached = append(attached, s.resolveAttachments(ctx, attachmentIDs, func() []float32 { return qVec })...)
 
 	// 3. Prompt desde la plantilla activa (versionada en prompt_templates).
 	templateID, templateText, err := s.store.ActiveTemplate(ctx, "")

@@ -27,7 +27,10 @@ export interface AttachedDoc {
   id: string
   filename: string
   chars: number
+  /** Texto inline (respaldo sin Oracle); '' cuando vive en el servidor. */
   text: string
+  /** Id del anexo persistido en Oracle (se referencia en vez de reenviar). */
+  attachmentId?: string
 }
 
 /** A saved conversation: its messages, attached docs, and metadata. */

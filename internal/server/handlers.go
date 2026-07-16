@@ -78,8 +78,11 @@ type chatRequest struct {
 	Message        string            `json:"message"`
 	History        []ollama.Message  `json:"history,omitempty"`
 	Documents      []rag.AttachedDoc `json:"documents,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	Options        map[string]any    `json:"options,omitempty"`
+	// Attachments son ids de anexos ya subidos a la conversación: el
+	// contenido se resuelve server-side (completo o por retrieval).
+	Attachments []string       `json:"attachments,omitempty"`
+	Model       string         `json:"model,omitempty"`
+	Options     map[string]any `json:"options,omitempty"`
 }
 
 // docContext construye el mensaje de sistema con los adjuntos del chat.
@@ -159,15 +162,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Anexos referenciados por id: el contenido vive en Oracle (los grandes
+	// se resuelven por retrieval con la pregunta).
+	docs := append(s.rag.AttachmentContext(r.Context(), req.Attachments, question), req.Documents...)
+
 	msgs := []ollama.Message{{Role: "system", Content: chatSystemPrompt}}
-	if len(req.Documents) > 0 {
-		msgs = append(msgs, ollama.Message{Role: "system", Content: docContext(req.Documents)})
+	if len(docs) > 0 {
+		msgs = append(msgs, ollama.Message{Role: "system", Content: docContext(docs)})
 	}
 	msgs = append(msgs, trimHistory(history, s.cfg.HistoryWindow, maxChatHistoryMsgChars)...)
 	msgs = append(msgs, ollama.Message{Role: "user", Content: question})
 
 	options := req.Options
-	if options == nil && len(req.Documents) > 0 {
+	if options == nil && len(docs) > 0 {
 		// Con adjuntos hace falta más ventana o el modelo los descarta.
 		options = map[string]any{"num_ctx": 8192, "temperature": 0.3}
 	}
