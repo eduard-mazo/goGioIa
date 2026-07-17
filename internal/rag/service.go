@@ -295,17 +295,19 @@ func questionHash(question string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// embedQueryCached vectoriza una consulta pasando por embedding_cache: el
-// mismo texto no se envía dos veces a Ollama.
-func (s *Service) embedQueryCached(ctx context.Context, question string) ([]float32, error) {
-	sum := sha256.Sum256([]byte(s.cfg.EmbedModel + "\x00" + queryPrefix + question))
+// embedCached vectoriza pasando por embedding_cache. La clave del hash puede
+// diferir del texto embebido (p.ej. la consulta original como clave y su
+// traducción como texto): textFn solo se evalúa en un miss, así los repetidos
+// no pagan ni la traducción ni el embedding.
+func (s *Service) embedCached(ctx context.Context, hashKey string, textFn func() string) ([]float32, error) {
+	sum := sha256.Sum256([]byte(s.cfg.EmbedModel + "\x00" + hashKey))
 	hash := hex.EncodeToString(sum[:])
 	if vec, err := s.store.CachedEmbedding(ctx, hash); err == nil && vec != nil {
 		return vec, nil
 	} else if err != nil {
 		log.Printf("rag: cache de embeddings no disponible: %v", err)
 	}
-	vec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, queryPrefix+question)
+	vec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, textFn())
 	if err != nil {
 		return nil, err
 	}
@@ -313,6 +315,60 @@ func (s *Service) embedQueryCached(ctx context.Context, question string) ([]floa
 		log.Printf("rag: no se pudo cachear el embedding: %v", err)
 	}
 	return vec, nil
+}
+
+// embedQueryCached vectoriza una consulta tal cual (sin traducir): lo usan
+// los anexos de conversación, cuyo idioma es el del usuario.
+func (s *Service) embedQueryCached(ctx context.Context, question string) ([]float32, error) {
+	return s.embedCached(ctx, queryPrefix+question, func() string { return queryPrefix + question })
+}
+
+// embedQueryKB vectoriza la consulta para buscar en la base de conocimiento.
+// Con RAG_TRANSLATE la traduce antes al inglés (el corpus y el embedder son
+// ingleses; una pregunta en español recupera mal sin esto). La clave de cache
+// es la pregunta original: repetirla no vuelve a traducir ni a embeber.
+func (s *Service) embedQueryKB(ctx context.Context, question string) ([]float32, error) {
+	if !s.cfg.RAGTranslate {
+		return s.embedQueryCached(ctx, question)
+	}
+	return s.embedCached(ctx, "en\x00"+queryPrefix+question, func() string {
+		english, err := s.translateQuery(ctx, question)
+		if err != nil {
+			log.Printf("rag: traducción de consulta falló (%v); se usa el texto original", err)
+			return queryPrefix + question
+		}
+		if s.cfg.RAGDebug && english != question {
+			log.Printf("rag[debug]: retrieval con consulta traducida: %s", preview(english, 100))
+		}
+		return queryPrefix + english
+	})
+}
+
+// translateQuery pide al modelo de generación la traducción al inglés de la
+// consulta (solo para retrieval: el prompt final conserva el texto original).
+func (s *Service) translateQuery(ctx context.Context, question string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := s.ollama.Complete(ctx, s.cfg.RAGModel, []ollama.Message{
+		{Role: "system", Content: "Eres un traductor. Devuelve únicamente la traducción al inglés " +
+			"del texto del usuario, sin comillas ni explicaciones. Si ya está en inglés, " +
+			"devuélvelo sin cambios. Conserva términos técnicos, nombres propios y comandos tal cual."},
+		{Role: "user", Content: question},
+	}, map[string]any{"temperature": 0.0, "num_ctx": 2048})
+	if err != nil {
+		return "", err
+	}
+	return sanitizeTranslation(out, question), nil
+}
+
+// sanitizeTranslation limpia la salida del traductor y descarta respuestas
+// degeneradas (vacías o desproporcionadas) volviendo al texto original.
+func sanitizeTranslation(out, original string) string {
+	out = strings.TrimSpace(strings.Trim(strings.TrimSpace(out), "\"“”'`"))
+	if out == "" || len(out) > 4*len(original)+200 {
+		return original
+	}
+	return out
 }
 
 // PrepareAsk vectoriza la pregunta, recupera los chunks más afines desde
@@ -364,9 +420,10 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		}
 	}
 
-	// 1. Embedding de la consulta (mismo espacio vectorial que los chunks).
+	// 1. Embedding de la consulta (mismo espacio vectorial que los chunks;
+	// con RAG_TRANSLATE se embebe su traducción al inglés).
 	embedStart := time.Now()
-	qVec, err := s.embedQueryCached(ctx, question)
+	qVec, err := s.embedQueryKB(ctx, question)
 	if err != nil {
 		return nil, fmt.Errorf("vectorizar la pregunta: %w", err)
 	}
@@ -406,8 +463,16 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	}
 
 	// 2b. Anexos referenciados por id: pequeños completos, grandes vía
-	// retrieval con el mismo embedding de la pregunta.
-	attached = append(attached, s.resolveAttachments(ctx, attachmentIDs, func() []float32 { return qVec })...)
+	// retrieval. Se embebe la pregunta original (no la traducida): los anexos
+	// del usuario pueden estar en español.
+	attached = append(attached, s.resolveAttachments(ctx, attachmentIDs, func() []float32 {
+		vec, err := s.embedQueryCached(ctx, question)
+		if err != nil {
+			log.Printf("rag: no se pudo vectorizar la pregunta para los anexos: %v", err)
+			return nil
+		}
+		return vec
+	})...)
 
 	// 3. Prompt desde la plantilla activa (versionada en prompt_templates).
 	prompt := renderPrompt(templateText, question, sources, attached)

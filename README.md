@@ -112,6 +112,14 @@ en la cola (`attachment_chunks`), recuperando en cada pregunta solo los
 fragmentos afines. Si Oracle no está disponible, el clip degrada al envío
 inline de siempre (`documents`).
 
+**Consulta multilingüe** — la base de conocimiento suele estar en inglés y el
+embedder (`nomic-embed-text`) es esencialmente inglés, así que una pregunta en
+español recupera mal. Con `RAG_TRANSLATE` (por defecto activo), la pregunta se
+traduce al inglés con el propio `RAG_MODEL` **solo para el retrieval**: el
+prompt final conserva el texto original y la respuesta sigue en español. La
+traducción se paga una sola vez por pregunta (la cache de embeddings se indexa
+por el texto original) y si falla se usa la pregunta tal cual.
+
 **Cache semántica** — las preguntas sin contexto adicional (sin adjuntos ni
 historial de seguimiento) pasan por `rag_semantic_cache`: primero un atajo por
 hash exacto de la pregunta normalizada (sin tocar Ollama) y luego una búsqueda
@@ -177,6 +185,7 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `RAG_CACHE_THRESHOLD` | `0.97`                            | Min. cosine similarity to reuse an answer |
 | `RAG_CACHE_TTL_HOURS` | `168`                             | Cached answers expire after this     |
 | `RAG_DEBUG`          | `false`                            | Verbose logs: every stored chunk and every retrieved source |
+| `RAG_TRANSLATE`      | `true`                             | Translate the question to English before embedding it for retrieval |
 | `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
 | `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
 | `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |

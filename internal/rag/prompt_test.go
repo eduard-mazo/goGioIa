@@ -73,3 +73,16 @@ func TestPreview(t *testing.T) {
 		t.Fatalf("preview recorta mal (runas): %q", got)
 	}
 }
+
+func TestSanitizeTranslation(t *testing.T) {
+	if got := sanitizeTranslation("  \"Restart the JBoss service\"  ", "reinicia el servicio JBoss"); got != "Restart the JBoss service" {
+		t.Fatalf("no limpió comillas: %q", got)
+	}
+	if got := sanitizeTranslation("   ", "pregunta original"); got != "pregunta original" {
+		t.Fatalf("vacío debe volver al original: %q", got)
+	}
+	long := strings.Repeat("bla ", 500)
+	if got := sanitizeTranslation(long, "corta"); got != "corta" {
+		t.Fatalf("respuesta desproporcionada debe volver al original")
+	}
+}

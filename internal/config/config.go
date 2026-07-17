@@ -47,6 +47,11 @@ type Config struct {
 	// RAGDebug logs verbose diagnostics: every chunk stored at ingest and
 	// every retrieved source per query (RAG_DEBUG=1 enables).
 	RAGDebug bool
+	// RAGTranslate translates the user question to English (with RAG_MODEL)
+	// before embedding it for retrieval: the knowledge base is in English and
+	// the embedder is English-centric, so Spanish questions retrieve poorly
+	// without it. RAG_TRANSLATE=0 disables (e.g. for an all-Spanish corpus).
+	RAGTranslate bool
 
 	// ── Oracle 23ai (vector store) ─────────────────────────────────────────
 	OracleUser     string
@@ -106,6 +111,7 @@ func Load() Config {
 		RAGCacheSim:          envFloat("RAG_CACHE_THRESHOLD", defaultRAGCacheSim),
 		RAGCacheTTLHours:     envInt("RAG_CACHE_TTL_HOURS", defaultRAGCacheTTLHours),
 		RAGDebug:             envBool("RAG_DEBUG", false),
+		RAGTranslate:         envBool("RAG_TRANSLATE", true),
 
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),
