@@ -174,6 +174,11 @@ func (s *Service) purgeLoop(ctx context.Context) {
 		} else if n > 0 {
 			log.Printf("rag: purgadas %d entradas de cache caducadas", n)
 		}
+		if n, err := s.store.PurgeStaleEmbeddings(ctx, 30*24*time.Hour); err != nil {
+			log.Printf("rag: purga de embeddings falló: %v", err)
+		} else if n > 0 {
+			log.Printf("rag: purgados %d embeddings de consulta sin uso", n)
+		}
 		select {
 		case <-ctx.Done():
 			return

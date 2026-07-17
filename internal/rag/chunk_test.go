@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"goGioIa/internal/pdf"
+	"goGioIa/internal/store"
 )
 
 func TestSplitTextShort(t *testing.T) {
@@ -83,5 +84,38 @@ func TestUsefulChunk(t *testing.T) {
 	}
 	if !usefulChunk("El servicio JBoss se reinicia con el comando systemctl restart jboss-eap.") {
 		t.Fatal("prosa normal debe ser útil")
+	}
+}
+
+func TestDiversifySources(t *testing.T) {
+	mk := func(doc string, sim float64) store.SearchResult {
+		return store.SearchResult{DocumentID: doc, Similarity: sim}
+	}
+	// Un documento grande acapara los primeros puestos; otro tiene un match.
+	cands := []store.SearchResult{
+		mk("big", 0.80), mk("big", 0.79), mk("big", 0.78), mk("big", 0.77),
+		mk("big", 0.76), mk("small", 0.75), mk("big", 0.74), mk("other", 0.73),
+	}
+	out := diversifySources(cands, 5, 2)
+	if len(out) != 5 {
+		t.Fatalf("esperaba 5, hay %d", len(out))
+	}
+	docs := map[string]int{}
+	for _, r := range out {
+		docs[r.DocumentID]++
+	}
+	// Cupo de 2 por doc → big:2, small:1, other:1; el 5º puesto se rellena
+	// con el mejor restante (big). Lo esencial: small y other entran.
+	if docs["big"] != 3 || docs["small"] != 1 || docs["other"] != 1 {
+		t.Fatalf("reparto inesperado: %v", docs)
+	}
+	// Solo un documento en los candidatos → se rellena con él.
+	cands = []store.SearchResult{mk("big", 0.8), mk("big", 0.7), mk("big", 0.6), mk("big", 0.5), mk("big", 0.4), mk("big", 0.3)}
+	out = diversifySources(cands, 5, 2)
+	if len(out) != 5 {
+		t.Fatalf("el relleno debe completar el topK: %d", len(out))
+	}
+	if out[0].Similarity < out[4].Similarity {
+		t.Fatal("el resultado debe quedar ordenado por afinidad")
 	}
 }

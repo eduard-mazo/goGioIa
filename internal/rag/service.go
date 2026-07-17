@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -218,6 +219,40 @@ func (s *Service) runIngest(docID []byte, fileName string, data []byte) error {
 	return nil
 }
 
+// diversifySources elige topK resultados respetando un máximo por documento
+// (los candidatos vienen ordenados por afinidad). Si con el cupo no se llena
+// el topK (p.ej. solo hay un documento), se rellena con los mejores restantes.
+func diversifySources(candidates []store.SearchResult, topK, maxPerDoc int) []store.SearchResult {
+	if len(candidates) <= topK {
+		return candidates
+	}
+	out := make([]store.SearchResult, 0, topK)
+	taken := make(map[int]bool, topK)
+	perDoc := make(map[string]int)
+	for i, c := range candidates {
+		if len(out) == topK {
+			return out
+		}
+		if perDoc[c.DocumentID] >= maxPerDoc {
+			continue
+		}
+		perDoc[c.DocumentID]++
+		taken[i] = true
+		out = append(out, c)
+	}
+	for i, c := range candidates {
+		if len(out) == topK {
+			break
+		}
+		if !taken[i] {
+			out = append(out, c)
+		}
+	}
+	// Restaurar el orden por afinidad tras el relleno.
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Similarity > out[b].Similarity })
+	return out
+}
+
 // preview compacta un texto para el log: espacios colapsados y recorte.
 func preview(s string, maxRunes int) string {
 	s = strings.Join(strings.Fields(s), " ")
@@ -295,11 +330,19 @@ func questionHash(question string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// kbQueryKeyVersion versiona la clave de cache de los embeddings de consulta
+// traducidos. Se incrementa cuando cambia la lógica de traducción: los
+// embeddings viejos (p.ej. los contaminados por el traductor que alucinaba)
+// quedan huérfanos y se regeneran en vez de servirse congelados.
+const kbQueryKeyVersion = "en:2"
+
 // embedCached vectoriza pasando por embedding_cache. La clave del hash puede
 // diferir del texto embebido (p.ej. la consulta original como clave y su
 // traducción como texto): textFn solo se evalúa en un miss, así los repetidos
-// no pagan ni la traducción ni el embedding.
-func (s *Service) embedCached(ctx context.Context, hashKey string, textFn func() string) ([]float32, error) {
+// no pagan ni la traducción ni el embedding. Si textFn devuelve cacheable
+// falso (p.ej. la traducción falló y se degradó al original), el vector se
+// usa pero no se guarda: el próximo intento vuelve a traducir.
+func (s *Service) embedCached(ctx context.Context, hashKey string, textFn func() (text string, cacheable bool)) ([]float32, error) {
 	sum := sha256.Sum256([]byte(s.cfg.EmbedModel + "\x00" + hashKey))
 	hash := hex.EncodeToString(sum[:])
 	if vec, err := s.store.CachedEmbedding(ctx, hash); err == nil && vec != nil {
@@ -307,12 +350,15 @@ func (s *Service) embedCached(ctx context.Context, hashKey string, textFn func()
 	} else if err != nil {
 		log.Printf("rag: cache de embeddings no disponible: %v", err)
 	}
-	vec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, textFn())
+	text, cacheable := textFn()
+	vec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, text)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.PutCachedEmbedding(ctx, hash, s.cfg.EmbedModel, vec); err != nil {
-		log.Printf("rag: no se pudo cachear el embedding: %v", err)
+	if cacheable {
+		if err := s.store.PutCachedEmbedding(ctx, hash, s.cfg.EmbedModel, vec); err != nil {
+			log.Printf("rag: no se pudo cachear el embedding: %v", err)
+		}
 	}
 	return vec, nil
 }
@@ -320,7 +366,7 @@ func (s *Service) embedCached(ctx context.Context, hashKey string, textFn func()
 // embedQueryCached vectoriza una consulta tal cual (sin traducir): lo usan
 // los anexos de conversación, cuyo idioma es el del usuario.
 func (s *Service) embedQueryCached(ctx context.Context, question string) ([]float32, error) {
-	return s.embedCached(ctx, queryPrefix+question, func() string { return queryPrefix + question })
+	return s.embedCached(ctx, queryPrefix+question, func() (string, bool) { return queryPrefix + question, true })
 }
 
 // embedQueryKB vectoriza la consulta para buscar en la base de conocimiento.
@@ -331,16 +377,16 @@ func (s *Service) embedQueryKB(ctx context.Context, question string) ([]float32,
 	if !s.cfg.RAGTranslate {
 		return s.embedQueryCached(ctx, question)
 	}
-	return s.embedCached(ctx, "en\x00"+queryPrefix+question, func() string {
+	return s.embedCached(ctx, kbQueryKeyVersion+"\x00"+queryPrefix+question, func() (string, bool) {
 		english, err := s.translateQuery(ctx, question)
 		if err != nil {
 			log.Printf("rag: traducción de consulta falló (%v); se usa el texto original", err)
-			return queryPrefix + question
+			return queryPrefix + question, false
 		}
 		if s.cfg.RAGDebug && english != question {
 			log.Printf("rag[debug]: retrieval con consulta traducida: %s", preview(english, 100))
 		}
-		return queryPrefix + english
+		return queryPrefix + english, true
 	})
 }
 
@@ -458,12 +504,17 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		}
 	}
 
-	// 2. Retrieval por similitud coseno.
+	// 2. Retrieval por similitud coseno. Se piden más candidatos de los que
+	// entran al prompt para poder diversificar por documento: un manual
+	// grande no debe acaparar todas las fuentes si otro documento también
+	// tiene chunks afines (visto en producción: 714 chunks de un manual
+	// desplazaban siempre al documento de 32 que tenía la respuesta).
 	searchStart := time.Now()
-	sources, err := s.store.SearchChunks(ctx, qVec, s.cfg.RAGTopK)
+	candidates, err := s.store.SearchChunks(ctx, qVec, s.cfg.RAGTopK*3)
 	if err != nil {
 		return nil, fmt.Errorf("búsqueda vectorial: %w", err)
 	}
+	sources := diversifySources(candidates, s.cfg.RAGTopK, 2)
 	// El diagnóstico clave de una respuesta «sin contexto» es esta línea:
 	// cuántas fuentes se recuperaron y con qué afinidad.
 	if len(sources) == 0 {
@@ -495,6 +546,13 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 
 	// 3. Prompt desde la plantilla activa (versionada en prompt_templates).
 	prompt := renderPrompt(templateText, question, sources, attached)
+	// Con historial, el modelo tiende a repetir su respuesta anterior en vez
+	// de responder la pregunta nueva; la instrucción al final del prompt (la
+	// zona de mayor atención) lo corrige mejor que un mensaje de sistema.
+	if len(history) > 0 {
+		prompt += "\n\n(Responde únicamente a la pregunta de arriba usando el contexto dado; " +
+			"no repitas respuestas anteriores de la conversación.)"
+	}
 
 	// 4. Trazabilidad: consulta + chunks usados.
 	queryID, err := s.store.CreateQuery(ctx, store.SessionID(sessionID), userID, question, qVec, model, templateID)
@@ -568,7 +626,7 @@ func (s *Service) FinishAsk(ctx context.Context, prep *Prepared, response, sourc
 	if err := s.store.SetQueryResponse(ctx, id, response); err != nil {
 		return err
 	}
-	if prep.cache != nil && strings.TrimSpace(response) != "" && !looksLikeRefusal(response) {
+	if prep.cache != nil && strings.TrimSpace(response) != "" && !LooksLikeRefusal(response) {
 		c := prep.cache
 		ttl := time.Duration(s.cfg.RAGCacheTTLHours) * time.Hour
 		if err := s.store.PutCache(ctx, c.hash, c.question, c.vec, c.model,
@@ -579,12 +637,12 @@ func (s *Service) FinishAsk(ctx context.Context, prep *Prepared, response, sourc
 	return nil
 }
 
-// looksLikeRefusal detecta el «no dispongo de esa información» que pide la
+// LooksLikeRefusal detecta el «no dispongo de esa información» que pide la
 // plantilla cuando el contexto no responde la pregunta. No merece cache: si
 // el retrieval mejora (otra redacción, documentos nuevos) la respuesta debe
 // regenerarse, no quedar congelada. Heurístico y conservador: un falso
 // positivo solo cuesta no cachear.
-func looksLikeRefusal(response string) bool {
+func LooksLikeRefusal(response string) bool {
 	if len(response) > 600 {
 		return false // las negativas de la plantilla son cortas
 	}

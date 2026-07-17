@@ -251,21 +251,18 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 			convID = id
 			if summary, stored, err := s.store.ConversationContext(r.Context(), id, ragHistoryWindow); err == nil {
 				for _, m := range stored {
+					// Las negativas previas («no dispongo de esa información»)
+					// no aportan contexto y el modelo tiende a repetirlas en
+					// vez de responder la pregunta nueva: fuera del historial.
+					if m.Role == "assistant" && rag.LooksLikeRefusal(m.Content) {
+						continue
+					}
 					history = append(history, ollama.Message{Role: m.Role, Content: m.Content})
 				}
 				history = trimHistory(history, ragHistoryWindow, maxRagHistoryMsgChars)
 				if summary != "" {
 					history = append([]ollama.Message{{Role: "system",
 						Content: "Resumen de la conversación hasta ahora:\n" + summary}}, history...)
-				}
-				// Sin esta valla, el modelo tiende a repetir la respuesta del
-				// turno anterior (p.ej. una negativa) en vez de responder la
-				// pregunta nueva (visto en producción con mistral 7B).
-				if len(history) > 0 {
-					history = append([]ollama.Message{{Role: "system",
-						Content: "Los mensajes anteriores son solo contexto de la conversación. " +
-							"Responde únicamente a la pregunta del último mensaje del usuario; " +
-							"no repitas respuestas anteriores."}}, history...)
 				}
 			} else {
 				log.Printf("rag: no se pudo leer el historial: %v", err)

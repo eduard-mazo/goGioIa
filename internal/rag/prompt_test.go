@@ -104,10 +104,10 @@ func TestSanitizeTranslationCutsHallucinations(t *testing.T) {
 }
 
 func TestLooksLikeRefusal(t *testing.T) {
-	if !looksLikeRefusal("En el contexto proporcionado, no cuento con información suficiente en mi base de conocimiento para responder a la pregunta del usuario.") {
+	if !LooksLikeRefusal("En el contexto proporcionado, no cuento con información suficiente en mi base de conocimiento para responder a la pregunta del usuario.") {
 		t.Fatal("la negativa de la plantilla debe detectarse")
 	}
-	if looksLikeRefusal("JBoss se reinicia con el script sp7 restart; ver (IG-GEN, pág. 328).") {
+	if LooksLikeRefusal("JBoss se reinicia con el script sp7 restart; ver (IG-GEN, pág. 328).") {
 		t.Fatal("una respuesta real no es una negativa")
 	}
 }

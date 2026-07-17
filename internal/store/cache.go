@@ -177,6 +177,21 @@ func (s *Store) InvalidateCache(ctx context.Context, qhash string, queryID []byt
 	return total + n, nil
 }
 
+// PurgeStaleEmbeddings elimina de embedding_cache las entradas sin uso
+// reciente (consultas que dejaron de repetirse y claves huérfanas de
+// versiones anteriores de la lógica de traducción).
+func (s *Store) PurgeStaleEmbeddings(ctx context.Context, unused time.Duration) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM embedding_cache
+		WHERE NVL(last_used_at, created_at) < SYSTIMESTAMP - NUMTODSINTERVAL(:1, 'SECOND')`,
+		int64(unused.Seconds()))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // PurgeExpiredCache elimina las entradas caducadas.
 func (s *Store) PurgeExpiredCache(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
