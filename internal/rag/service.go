@@ -346,15 +346,22 @@ func (s *Service) embedQueryKB(ctx context.Context, question string) ([]float32,
 
 // translateQuery pide al modelo de generación la traducción al inglés de la
 // consulta (solo para retrieval: el prompt final conserva el texto original).
+// Los ejemplos few-shot y el tope de generación evitan que el modelo conteste
+// la pregunta en vez de traducirla (visto en producción con mistral 7B).
 func (s *Service) translateQuery(ctx context.Context, question string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := s.ollama.Complete(ctx, s.cfg.RAGModel, []ollama.Message{
-		{Role: "system", Content: "Eres un traductor. Devuelve únicamente la traducción al inglés " +
-			"del texto del usuario, sin comillas ni explicaciones. Si ya está en inglés, " +
-			"devuélvelo sin cambios. Conserva términos técnicos, nombres propios y comandos tal cual."},
+		{Role: "system", Content: "Traduce al inglés la consulta del usuario tal cual, sin responderla, " +
+			"sin explicar nada y sin añadir información. Devuelve una sola línea con la traducción. " +
+			"Conserva términos técnicos, nombres propios y comandos. " +
+			"Si la consulta ya está en inglés, devuélvela sin cambios."},
+		{Role: "user", Content: "cómo reinicio el servicio de base de datos"},
+		{Role: "assistant", Content: "how do I restart the database service"},
+		{Role: "user", Content: "qué es un cortafuegos"},
+		{Role: "assistant", Content: "what is a firewall"},
 		{Role: "user", Content: question},
-	}, map[string]any{"temperature": 0.0, "num_ctx": 2048})
+	}, map[string]any{"temperature": 0.0, "num_ctx": 1024, "num_predict": 96})
 	if err != nil {
 		return "", err
 	}
@@ -362,10 +369,22 @@ func (s *Service) translateQuery(ctx context.Context, question string) (string, 
 }
 
 // sanitizeTranslation limpia la salida del traductor y descarta respuestas
-// degeneradas (vacías o desproporcionadas) volviendo al texto original.
+// degeneradas volviendo al texto original: una traducción real de una
+// consulta corta es una sola línea de tamaño comparable; todo lo que exceda
+// eso es el modelo añadiendo contenido inventado que contaminaría el
+// embedding de búsqueda.
 func sanitizeTranslation(out, original string) string {
-	out = strings.TrimSpace(strings.Trim(strings.TrimSpace(out), "\"“”'`"))
-	if out == "" || len(out) > 4*len(original)+200 {
+	out = strings.TrimSpace(out)
+	if i := strings.IndexByte(out, '\n'); i >= 0 {
+		out = out[:i]
+	}
+	out = strings.TrimSpace(strings.Trim(out, "\"“”'`"))
+	for _, prefix := range []string{"translation:", "traducción:", "traduccion:"} {
+		if len(out) > len(prefix) && strings.EqualFold(out[:len(prefix)], prefix) {
+			out = strings.TrimSpace(out[len(prefix):])
+		}
+	}
+	if out == "" || len(out) > 2*len(original)+60 {
 		return original
 	}
 	return out
@@ -549,7 +568,7 @@ func (s *Service) FinishAsk(ctx context.Context, prep *Prepared, response, sourc
 	if err := s.store.SetQueryResponse(ctx, id, response); err != nil {
 		return err
 	}
-	if prep.cache != nil && strings.TrimSpace(response) != "" {
+	if prep.cache != nil && strings.TrimSpace(response) != "" && !looksLikeRefusal(response) {
 		c := prep.cache
 		ttl := time.Duration(s.cfg.RAGCacheTTLHours) * time.Hour
 		if err := s.store.PutCache(ctx, c.hash, c.question, c.vec, c.model,
@@ -558,6 +577,28 @@ func (s *Service) FinishAsk(ctx context.Context, prep *Prepared, response, sourc
 		}
 	}
 	return nil
+}
+
+// looksLikeRefusal detecta el «no dispongo de esa información» que pide la
+// plantilla cuando el contexto no responde la pregunta. No merece cache: si
+// el retrieval mejora (otra redacción, documentos nuevos) la respuesta debe
+// regenerarse, no quedar congelada. Heurístico y conservador: un falso
+// positivo solo cuesta no cachear.
+func looksLikeRefusal(response string) bool {
+	if len(response) > 600 {
+		return false // las negativas de la plantilla son cortas
+	}
+	r := strings.ToLower(response)
+	if !strings.Contains(r, "base de conocimiento") && !strings.Contains(r, "contexto") {
+		return false
+	}
+	for _, neg := range []string{"no cuento con", "no dispon", "no tengo", "no se encuentra",
+		"no está en", "no hay información", "insuficiente"} {
+		if strings.Contains(r, neg) {
+			return true
+		}
+	}
+	return false
 }
 
 // Feedback guarda la valoración del usuario (-1 / 0 / 1) sobre una respuesta.

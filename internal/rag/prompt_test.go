@@ -86,3 +86,28 @@ func TestSanitizeTranslation(t *testing.T) {
 		t.Fatalf("respuesta desproporcionada debe volver al original")
 	}
 }
+
+func TestSanitizeTranslationCutsHallucinations(t *testing.T) {
+	// El traductor añadió una explicación tras la traducción (visto en prod).
+	out := sanitizeTranslation("What is OGG in Spectrum Power 7? Oracle GoldenGate is a replication product that provides high availability and real-time data integration for enterprise databases across many platforms.", "Que es el OGG en spectrum power 7")
+	if out != "Que es el OGG en spectrum power 7" {
+		t.Fatalf("una salida desproporcionada debe volver al original: %q", out)
+	}
+	out = sanitizeTranslation("what is JBoss\nJBoss is an application server...", "qué es un jboss")
+	if out != "what is JBoss" {
+		t.Fatalf("debe quedarse con la primera línea: %q", out)
+	}
+	out = sanitizeTranslation("Translation: restart the JBoss service", "reinicia el servicio jboss")
+	if out != "restart the JBoss service" {
+		t.Fatalf("debe quitar el prefijo: %q", out)
+	}
+}
+
+func TestLooksLikeRefusal(t *testing.T) {
+	if !looksLikeRefusal("En el contexto proporcionado, no cuento con información suficiente en mi base de conocimiento para responder a la pregunta del usuario.") {
+		t.Fatal("la negativa de la plantilla debe detectarse")
+	}
+	if looksLikeRefusal("JBoss se reinicia con el script sp7 restart; ver (IG-GEN, pág. 328).") {
+		t.Fatal("una respuesta real no es una negativa")
+	}
+}

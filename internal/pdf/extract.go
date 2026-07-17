@@ -5,9 +5,9 @@ package pdf
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/ledongthuc/pdf"
 )
@@ -62,6 +62,7 @@ func ExtractPages(data []byte) (pages []Page, err error) {
 		text := extractPageText(reader, i)
 		pages = append(pages, Page{Number: i, Text: text})
 	}
+	pages = stripBoilerplate(pages)
 
 	empty := true
 	for _, p := range pages {
@@ -74,6 +75,66 @@ func ExtractPages(data []byte) (pages []Page, err error) {
 		return nil, fmt.Errorf("no se encontró texto (el PDF puede ser solo imagen / escaneado; aplique OCR externo antes de subirlo)")
 	}
 	return pages, nil
+}
+
+// stripBoilerplate elimina encabezados y pies de página: toda línea cuya
+// forma normalizada se repite en buena parte de las páginas es plantilla de
+// página, no contenido. Repetida en cada chunk, esa línea contamina el
+// retrieval: todos los chunks del manual se parecen a cualquier consulta que
+// mencione el nombre del producto.
+func stripBoilerplate(pages []Page) []Page {
+	if len(pages) < 4 {
+		return pages
+	}
+	counts := make(map[string]int)
+	for _, p := range pages {
+		seen := make(map[string]bool)
+		for _, line := range strings.Split(p.Text, "\n") {
+			key := lineKey(line)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			counts[key]++
+		}
+	}
+	threshold := max(3, len(pages)*2/5)
+	out := make([]Page, 0, len(pages))
+	for _, p := range pages {
+		var b strings.Builder
+		for _, line := range strings.Split(p.Text, "\n") {
+			if key := lineKey(line); key != "" && counts[key] >= threshold {
+				continue
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		out = append(out, Page{Number: p.Number, Text: strings.TrimSpace(b.String())})
+	}
+	return out
+}
+
+// lineKey normaliza una línea para compararla entre páginas: minúsculas, sin
+// dígitos (los números de página cambian) y espacios colapsados. Las líneas
+// largas nunca son encabezados y las muy cortas tras quitar dígitos no dan
+// evidencia suficiente; ambas devuelven "" (no comparables).
+func lineKey(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" || len(line) > 120 {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range line {
+		if unicode.IsDigit(r) {
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	key := strings.Join(strings.Fields(b.String()), " ")
+	if len(key) < 4 {
+		return ""
+	}
+	return key
 }
 
 // extractPageText parses one page, converting parser panics into empty text
@@ -96,33 +157,22 @@ func extractPageText(reader *pdf.Reader, n int) (text string) {
 }
 
 // ExtractText returns the concatenated plain text of every page in the PDF.
-// The parser can panic on malformed files, so recovery is used to convert
-// those into ordinary errors.
-func ExtractText(data []byte) (text string, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("no se pudo leer el PDF (puede estar escaneado, cifrado o dañado): %v", r)
-		}
-	}()
-
-	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+// Reutiliza ExtractPages para que los anexos reciban la misma limpieza
+// (encabezados repetidos, puntos de índices) que la ingesta paginada.
+func ExtractText(data []byte) (string, error) {
+	pages, err := ExtractPages(data)
 	if err != nil {
-		return "", fmt.Errorf("PDF inválido: %w", err)
-	}
-
-	r, err := reader.GetPlainText()
-	if err != nil {
-		return "", fmt.Errorf("no se pudo extraer el texto del PDF: %w", err)
-	}
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
 		return "", err
 	}
-
-	out := normalize(buf.String())
-	if out == "" {
-		return "", fmt.Errorf("no se encontró texto (el PDF puede ser solo imagen / escaneado)")
+	var b strings.Builder
+	for _, p := range pages {
+		if p.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(p.Text)
 	}
-	return out, nil
+	return b.String(), nil
 }
