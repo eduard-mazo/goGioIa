@@ -19,10 +19,16 @@ const embedTimeout = 120 * time.Second
 // carga sostenida el runner de Ollama puede reciclarse y cortar la conexión.
 const embedAttempts = 3
 
+// embedKeepAlive mantiene el modelo de embeddings cargado en el host: es
+// pequeño (~centenares de MB) y recargarlo tras cada generación del LLM
+// añadía segundos al primer embed (visto en producción: 6s vs 400ms).
+const embedKeepAlive = "30m"
+
 // embedRequest es el payload del endpoint moderno /api/embed (acepta lotes).
 type embedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model     string   `json:"model"`
+	Input     []string `json:"input"`
+	KeepAlive string   `json:"keep_alive,omitempty"`
 }
 
 type embedResponse struct {
@@ -50,7 +56,7 @@ func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]
 	if len(inputs) == 0 {
 		return nil, nil
 	}
-	body, err := json.Marshal(embedRequest{Model: model, Input: inputs})
+	body, err := json.Marshal(embedRequest{Model: model, Input: inputs, KeepAlive: embedKeepAlive})
 	if err != nil {
 		return nil, err
 	}

@@ -2,8 +2,11 @@ package rag
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"goGioIa/internal/store"
@@ -121,8 +124,14 @@ func (s *Service) runAttachmentJob(ctx context.Context, workerID int, job *store
 		workerID, hex.EncodeToString(job.PayloadID), job.Attempts)
 	msg := ""
 	if err := s.runEmbedAttachment(job.PayloadID); err != nil {
-		log.Printf("rag: vectorización de anexo falló: %v", err)
-		msg = err.Error()
+		// El anexo pudo borrarse con el trabajo ya en marcha: no es un fallo.
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "ORA-02291") {
+			log.Printf("rag: anexo %s eliminado durante la vectorización; trabajo descartado",
+				hex.EncodeToString(job.PayloadID))
+		} else {
+			log.Printf("rag: vectorización de anexo falló: %v", err)
+			msg = err.Error()
+		}
 	}
 	if err := s.store.FinishJob(ctx, job.ID, msg); err != nil {
 		log.Printf("rag: no se pudo cerrar el trabajo del anexo: %v", err)

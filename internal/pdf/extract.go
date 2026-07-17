@@ -17,6 +17,11 @@ var (
 	trailingWS  = regexp.MustCompile(`[ \t]+\n`)
 	blankRuns   = regexp.MustCompile(`\n{3,}`)
 	multiSpaces = regexp.MustCompile(`[ \t]{2,}`)
+	// dotLeaders son las líneas de puntos de los índices («Título ...... 32»):
+	// páginas enteras de puntos producían chunks sin señal que contaminaban el
+	// retrieval. 4+ puntos seguidos (con o sin espacios) no aparecen en prosa
+	// ni en números de versión, así que se colapsan a un espacio.
+	dotLeaders = regexp.MustCompile(`(?:\.[ \t]*){4,}`)
 )
 
 // normalize tidies the raw extractor output: normalises line endings, strips
@@ -24,6 +29,7 @@ var (
 // wasted tokens without altering the document's wording.
 func normalize(s string) string {
 	s = newlines.Replace(s)
+	s = dotLeaders.ReplaceAllString(s, " ")
 	s = trailingWS.ReplaceAllString(s, "\n")
 	s = multiSpaces.ReplaceAllString(s, " ")
 	s = blankRuns.ReplaceAllString(s, "\n\n")

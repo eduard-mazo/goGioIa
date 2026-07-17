@@ -64,7 +64,13 @@ func (s *Store) LoadAttachment(ctx context.Context, id []byte) (*Attachment, err
 // DeleteAttachment elimina el anexo (y sus chunks por CASCADE), verificando
 // que pertenece a la conversación indicada.
 func (s *Store) DeleteAttachment(ctx context.Context, convID, attID []byte) error {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 		DELETE FROM conversation_attachments
 		WHERE attachment_id = :1 AND conversation_id = :2`, attID, convID)
 	if err != nil {
@@ -73,7 +79,15 @@ func (s *Store) DeleteAttachment(ctx context.Context, convID, attID []byte) erro
 	if n, _ := res.RowsAffected(); n == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	// Sin el anexo, su vectorización pendiente ya no tiene sentido (y fallaría
+	// con ORA-02291 al insertar chunks de un padre inexistente).
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM processing_jobs
+		WHERE payload_id = :1 AND job_type = :2 AND status = 'QUEUED'`,
+		attID, JobEmbedAttachment); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ClearAttachmentChunks descarta los chunks de un anexo (revectorización).

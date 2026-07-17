@@ -2,6 +2,7 @@ package rag
 
 import (
 	"strings"
+	"unicode"
 
 	"goGioIa/internal/pdf"
 )
@@ -24,11 +25,33 @@ func chunkPages(pages []pdf.Page, size, overlap int) []chunk {
 			continue
 		}
 		for _, part := range splitText(text, size, overlap) {
+			if !usefulChunk(part) {
+				continue
+			}
 			out = append(out, chunk{Index: idx, Page: p.Number, Text: part})
 			idx++
 		}
 	}
 	return out
+}
+
+// usefulChunk descarta fragmentos sin señal recuperable: demasiado cortos o
+// compuestos mayormente de puntuación y artefactos de extracción (glifos sin
+// mapear «�», restos de índices). Vectorizarlos contamina el retrieval: son
+// vecinos débiles de cualquier consulta.
+func usefulChunk(s string) bool {
+	const minChars = 40
+	if len(s) < minChars {
+		return false
+	}
+	letters, total := 0, 0
+	for _, r := range s {
+		total++
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			letters++
+		}
+	}
+	return letters*2 >= total // al menos la mitad debe ser letras o dígitos
 }
 
 // splitText divide un texto en trozos de como máximo size caracteres con

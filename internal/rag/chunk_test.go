@@ -46,9 +46,9 @@ func TestSplitTextNoOverlapLargerThanSize(t *testing.T) {
 
 func TestChunkPagesKeepsPageNumbers(t *testing.T) {
 	pages := []pdf.Page{
-		{Number: 1, Text: "texto de la primera página"},
+		{Number: 1, Text: "texto de la primera página con contenido suficiente para el filtro"},
 		{Number: 2, Text: ""},
-		{Number: 3, Text: "texto de la tercera página"},
+		{Number: 3, Text: "texto de la tercera página con contenido suficiente para el filtro"},
 	}
 	chunks := chunkPages(pages, 1800, 250)
 	if len(chunks) != 2 {
@@ -59,5 +59,29 @@ func TestChunkPagesKeepsPageNumbers(t *testing.T) {
 	}
 	if chunks[0].Index != 0 || chunks[1].Index != 1 {
 		t.Fatalf("índices incorrectos: %+v", chunks)
+	}
+}
+
+func TestChunkPagesSkipsJunk(t *testing.T) {
+	pages := []pdf.Page{
+		{Number: 1, Text: strings.Repeat("� ", 400)},                        // glifos sin mapear
+		{Number: 2, Text: "ok"},                                             // demasiado corto
+		{Number: 3, Text: strings.Repeat("Texto útil con contenido. ", 20)}, // válido
+	}
+	chunks := chunkPages(pages, 1800, 250)
+	if len(chunks) != 1 {
+		t.Fatalf("esperaba 1 chunk útil, hay %d", len(chunks))
+	}
+	if chunks[0].Page != 3 || chunks[0].Index != 0 {
+		t.Fatalf("chunk inesperado: pág %d idx %d", chunks[0].Page, chunks[0].Index)
+	}
+}
+
+func TestUsefulChunk(t *testing.T) {
+	if usefulChunk(". . . . . . . . . . . . . . . . . . . . . . . . . . . .") {
+		t.Fatal("una línea de puntos no es un chunk útil")
+	}
+	if !usefulChunk("El servicio JBoss se reinicia con el comando systemctl restart jboss-eap.") {
+		t.Fatal("prosa normal debe ser útil")
 	}
 }
