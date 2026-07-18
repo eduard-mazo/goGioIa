@@ -80,6 +80,30 @@ func findBreak(text string, start, end int) int {
 	return end
 }
 
+// capChunks garantiza que ningún chunk supere maxChars: los que exceden se
+// re-trocean (sin solape) y la lista completa se reindexa. Es determinista:
+// mismos datos y configuración → mismos índices, condición necesaria para
+// reanudar una ingesta sin duplicar vectores.
+func capChunks(chunks []chunk, maxChars int) []chunk {
+	if maxChars <= 0 {
+		return chunks
+	}
+	out := make([]chunk, 0, len(chunks))
+	for _, c := range chunks {
+		if len(c.Text) <= maxChars {
+			out = append(out, c)
+			continue
+		}
+		for _, part := range splitText(c.Text, maxChars, 0) {
+			out = append(out, chunk{Page: c.Page, Text: part})
+		}
+	}
+	for i := range out {
+		out[i].Index = i
+	}
+	return out
+}
+
 // estimateTokens aproxima el nº de tokens (≈ 4 caracteres por token).
 func estimateTokens(s string) int {
 	n := len(s) / 4

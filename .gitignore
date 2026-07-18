@@ -19,3 +19,6 @@ npm-debug.log*
 
 # Deploy artefacts
 *.tar
+
+# Credenciales locales de desarrollo (nunca se versionan)
+/deploy/dev.local.env

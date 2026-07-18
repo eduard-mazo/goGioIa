@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -36,19 +37,90 @@ type ChatChunk struct {
 	Error string `json:"error,omitempty"`
 }
 
+// Ajustes por defecto del cliente; se cambian con las Option de New.
+const (
+	defaultEmbedMaxTokens   = 2048 // n_ctx_train de nomic-embed-text
+	defaultEmbedConcurrency = 1    // una llamada de embeddings a la vez
+	defaultMaxAttempts      = 4    // intentos por llamada de embeddings
+)
+
 // Client talks to a single Ollama chat endpoint.
 type Client struct {
-	endpoint string
-	http     *http.Client
+	endpoint       string
+	http           *http.Client
+	embedSem       chan struct{} // limita las llamadas de embeddings simultáneas
+	maxAttempts    int
+	embedMaxTokens int
+	embedKeepAlive string
+}
+
+// Option ajusta el comportamiento del cliente al construirlo.
+type Option func(*Client)
+
+// WithEmbedConcurrency limita cuántas llamadas de embeddings corren a la vez
+// (1 por defecto: adecuado para GPUs con poca VRAM).
+func WithEmbedConcurrency(n int) Option {
+	return func(c *Client) {
+		if n > 0 {
+			c.embedSem = make(chan struct{}, n)
+		}
+	}
+}
+
+// WithEmbedMaxTokens fija el contexto del modelo de embeddings: las entradas
+// que lo superan se rechazan y num_ctx se envía con este valor.
+func WithEmbedMaxTokens(n int) Option {
+	return func(c *Client) {
+		if n > 0 {
+			c.embedMaxTokens = n
+		}
+	}
+}
+
+// WithEmbedKeepAlive controla cuánto mantiene Ollama cargado el modelo de
+// embeddings entre llamadas (formato Ollama, p.ej. "10m").
+func WithEmbedKeepAlive(v string) Option {
+	return func(c *Client) { c.embedKeepAlive = v }
+}
+
+// WithMaxAttempts fija el nº máximo de intentos por llamada de embeddings.
+func WithMaxAttempts(n int) Option {
+	return func(c *Client) {
+		if n > 0 {
+			c.maxAttempts = n
+		}
+	}
 }
 
 // New returns a Client for the given fully-qualified chat endpoint URL.
-func New(endpoint string) *Client {
-	return &Client{
+func New(endpoint string, opts ...Option) *Client {
+	c := &Client{
 		endpoint: endpoint,
-		// No overall timeout: chat responses stream and may run for a while.
-		http: &http.Client{},
+		// Un único cliente con pool de conexiones y timeouts explícitos.
+		// Sin timeout global: el chat es streaming de larga duración; los
+		// embeddings acotan su duración por contexto en cada llamada.
+		http: &http.Client{Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          8,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			// Cargar un modelo en frío puede tardar minutos en GPUs pequeñas;
+			// las cabeceras llegan solo cuando el runner está listo.
+			ResponseHeaderTimeout: 5 * time.Minute,
+		}},
+		embedSem:       make(chan struct{}, defaultEmbedConcurrency),
+		maxAttempts:    defaultMaxAttempts,
+		embedMaxTokens: defaultEmbedMaxTokens,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Stream POSTs a chat request and returns the raw NDJSON response body.
