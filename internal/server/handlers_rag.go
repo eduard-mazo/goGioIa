@@ -170,8 +170,10 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 	})
 	flusher.Flush()
 
+	genStart := time.Now()
 	body, err := s.ollama.Stream(r.Context(), prep.Model, prep.Messages, prep.Options)
 	if err != nil {
+		s.recordGeneration(prep.QueryID, prep.Model, "rag", genStart, nil, err)
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()
 		return
@@ -203,6 +205,7 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if chunk.Error != "" {
+			s.recordGeneration(prep.QueryID, prep.Model, "rag", genStart, nil, errors.New(chunk.Error))
 			writeSSE(w, "error", map[string]string{"error": chunk.Error})
 			flusher.Flush()
 			return
@@ -213,15 +216,50 @@ func (s *Server) handleRagAsk(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 		if chunk.Done {
+			s.recordGeneration(prep.QueryID, prep.Model, "rag", genStart, &chunk, nil)
 			writeSSE(w, "done", map[string]any{"done": true, "queryId": prep.QueryID})
 			flusher.Flush()
 			return
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		s.recordGeneration(prep.QueryID, prep.Model, "rag", genStart, nil, err)
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()
 	}
+}
+
+// recordGeneration registra el evento de generación de una respuesta (con los
+// conteos autoritativos del chunk final de Ollama cuando el stream terminó).
+func (s *Server) recordGeneration(refHex, model, detail string, start time.Time, final *ollama.ChatChunk, genErr error) {
+	ev := store.Event{
+		Kind: "generation", Model: model, OK: genErr == nil,
+		Latency: time.Since(start), Detail: detail,
+	}
+	if refHex != "" {
+		if id, err := store.ParseID(refHex); err == nil {
+			ev.Ref = id
+		}
+	}
+	if final != nil {
+		ev.TokensIn, ev.TokensOut = final.PromptEvalCount, final.EvalCount
+		if ev.TokensIn > 0 || ev.TokensOut > 0 {
+			ev.TokenSource = "ollama"
+		}
+		ev.LoadDuration = time.Duration(final.LoadDuration)
+		if final.Model != "" {
+			ev.Model = final.Model
+		}
+		// done_reason ≠ stop delata respuestas cortadas por límite de tokens.
+		if final.DoneReason != "" && final.DoneReason != "stop" {
+			ev.Detail = detail + ";stop=" + final.DoneReason
+		}
+	}
+	if genErr != nil {
+		ev.ErrorKind = ollama.ClassifyError(genErr)
+		ev.ErrorDetail = genErr.Error()
+	}
+	s.store.RecordEvent(ev)
 }
 
 // uiSource es la vista compacta de un chunk recuperado que consume la UI.

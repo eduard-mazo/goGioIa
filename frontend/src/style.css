@@ -44,6 +44,12 @@
   --signal-fault: #d8402a;
   --signal-wait: #6eb3d6;
 
+  /* Series de charts (dashboard de operaciones). Par azul/rojo validado
+     contra deuteranopia/protanopia (script dataviz): el par verde/rojo de la
+     marca colapsa con ΔE 4.8 y no es apto para series. */
+  --chart-main: #2a78d6;
+  --chart-fail: #d8402a;
+
   /* Barra lateral — lienzo bosque con destellos cítrico. */
   --sidebar: #0d9648;
   --sidebar-foreground: #eaf5de;
@@ -80,6 +86,10 @@
   --signal-warn: #f0be5d;
   --signal-fault: #f06452;
   --signal-wait: #8ec9e6;
+
+  /* Pasos oscuros del par de series, validados sobre #0e1712. */
+  --chart-main: #4a90d9;
+  --chart-fail: #e0654f;
 
   --sidebar: #0a1510;
   --sidebar-foreground: #eef3e4;

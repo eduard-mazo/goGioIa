@@ -96,6 +96,39 @@ CREATE TABLE prompt_templates (
     CONSTRAINT uq_prompt_name_ver UNIQUE (name, version)
 );
 
+-- ── Observabilidad (dashboard de operaciones RAG) ──────────────────────────
+-- Un evento por operación terminada del pipeline. kind:
+--   embed | query_embed | retrieval | generation | ingest
+-- ref_id correlaciona con document_id o query_id según el kind.
+-- token_source: 'ollama' (conteo exacto del host) | 'estimated' (~4 chars/token).
+CREATE TABLE rag_events (
+    event_id      RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    kind          VARCHAR2(40) NOT NULL,
+    ref_id        RAW(16),
+    model         VARCHAR2(100),
+    status        VARCHAR2(10) DEFAULT 'OK' NOT NULL,
+    http_status   NUMBER,
+    error_kind    VARCHAR2(40),
+    error_detail  VARCHAR2(2000),
+    latency_ms    NUMBER,
+    queue_ms      NUMBER,
+    attempts      NUMBER,
+    batch_size    NUMBER,
+    payload_bytes NUMBER,
+    tokens_in     NUMBER,
+    tokens_out    NUMBER,
+    token_source  VARCHAR2(20),
+    load_ms       NUMBER,
+    detail        VARCHAR2(1000),
+    created_at    TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT ck_rag_events_status CHECK (status IN ('OK','ERROR'))
+);
+
+CREATE INDEX ix_rag_events_kind_time ON rag_events (kind, created_at);
+CREATE INDEX ix_rag_events_ref ON rag_events (ref_id);
+CREATE INDEX ix_rag_queries_created ON rag_queries (created_at);
+CREATE INDEX ix_documents_uploaded ON documents (uploaded_at);
+
 -- ── Opción normalizada (no usada; para varios modelos de embeddings) ───────
 --
 -- CREATE TABLE chunk_embeddings (

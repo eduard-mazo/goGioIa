@@ -75,6 +75,10 @@ type embedRequest struct {
 type embedResponse struct {
 	Embeddings [][]float32 `json:"embeddings"`
 	Error      string      `json:"error,omitempty"`
+	// Métricas autoritativas del host (presentes en hosts modernos).
+	PromptEvalCount int   `json:"prompt_eval_count,omitempty"` // tokens de entrada reales
+	LoadDuration    int64 `json:"load_duration,omitempty"`     // ns; >0 = el modelo se (re)cargó
+	TotalDuration   int64 `json:"total_duration,omitempty"`    // ns
 }
 
 // legacyEmbedRequest es el payload del endpoint antiguo /api/embeddings
@@ -98,22 +102,56 @@ func (c *Client) embedOptions() map[string]any {
 	return map[string]any{"num_ctx": c.embedMaxTokens}
 }
 
+// EmbedMeta son los metadatos de una llamada de embeddings terminada.
+type EmbedMeta struct {
+	Tokens       int           // prompt_eval_count de Ollama (0 = el host no lo reportó)
+	Latency      time.Duration //
+	LoadDuration time.Duration // >0 delata (re)carga del modelo
+	Attempts     int           //
+}
+
 // Embed genera un embedding por cada texto de entrada usando el modelo dado
 // (p.ej. nomic-embed-text → 768 dimensiones). Valida las entradas contra el
 // límite de contexto, serializa las llamadas según la concurrencia
 // configurada y reintenta solo fallos transitorios. Intenta el endpoint por
 // lotes /api/embed y, si el host no lo soporta, recurre a /api/embeddings.
+// Cada llamada terminada (con éxito o no) se emite al Recorder configurado.
 func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]float32, error) {
+	vecs, _, err := c.EmbedWithMeta(ctx, model, inputs)
+	return vecs, err
+}
+
+// EmbedWithMeta es Embed devolviendo además los metadatos de la llamada.
+func (c *Client) EmbedWithMeta(ctx context.Context, model string, inputs []string) (vecs [][]float32, meta EmbedMeta, err error) {
 	if len(inputs) == 0 {
-		return nil, nil
+		return nil, meta, nil
 	}
+	payloadBytes := 0
+	for _, in := range inputs {
+		payloadBytes += len(in)
+	}
+	start := time.Now()
+	var queueWait time.Duration
+	var attempts, tokensIn int
+	var loadDur time.Duration
+	defer func() {
+		meta = EmbedMeta{Tokens: tokensIn, Latency: time.Since(start), LoadDuration: loadDur, Attempts: attempts}
+		c.emit(Event{
+			Op: "embed", Purpose: ctxPurpose(ctx), Ref: ctxRef(ctx),
+			Model: model, OK: err == nil,
+			Latency: time.Since(start), QueueWait: queueWait, Attempts: attempts,
+			BatchSize: len(inputs), PayloadBytes: payloadBytes,
+			TokensIn: tokensIn, LoadDuration: loadDur,
+		}, err)
+	}()
+
 	maxChars := MaxInputChars(c.embedMaxTokens)
 	for i, in := range inputs {
 		if strings.TrimSpace(in) == "" {
-			return nil, &ValidationError{Reason: fmt.Sprintf("la entrada %d está vacía", i)}
+			return nil, meta, &ValidationError{Reason: fmt.Sprintf("la entrada %d está vacía", i)}
 		}
 		if len(in) > maxChars {
-			return nil, &ValidationError{Reason: fmt.Sprintf(
+			return nil, meta, &ValidationError{Reason: fmt.Sprintf(
 				"la entrada %d (%d caracteres, ~%d tokens) supera el límite de %d tokens del modelo",
 				i, len(in), len(in)/conservativeCharsPerToken, c.embedMaxTokens)}
 		}
@@ -122,9 +160,10 @@ func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]
 	// Semáforo de embeddings: en GPUs pequeñas una llamada a la vez.
 	select {
 	case c.embedSem <- struct{}{}:
+		queueWait = time.Since(start)
 		defer func() { <-c.embedSem }()
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, meta, ctx.Err()
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
@@ -137,43 +176,114 @@ func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]
 		KeepAlive: c.embedKeepAlive,
 	})
 	if err != nil {
-		return nil, err
+		return nil, meta, err
 	}
 
-	respBody, err := c.postWithRetry(ctx, c.baseURL()+"/api/embed", payload, len(inputs))
+	respBody, tries, err := c.postWithRetry(ctx, c.baseURL()+"/api/embed", payload, len(inputs))
+	attempts = tries
 	if err != nil {
 		if httpErr, ok := errors.AsType[*HTTPError](err); ok && httpErr.StatusCode == http.StatusNotFound {
-			return c.embedLegacy(ctx, model, inputs)
+			vecs, err = c.embedLegacy(ctx, model, inputs)
+			return vecs, meta, err
 		}
-		return nil, err
+		return nil, meta, err
 	}
 
 	var er embedResponse
 	if err := json.Unmarshal(respBody, &er); err != nil {
-		return nil, err
+		return nil, meta, err
 	}
 	if er.Error != "" {
-		return nil, fmt.Errorf("ollama embed: %s", er.Error)
+		return nil, meta, fmt.Errorf("ollama embed: %s", er.Error)
 	}
 	if len(er.Embeddings) != len(inputs) {
-		return nil, fmt.Errorf("ollama embed devolvió %d vectores para %d entradas", len(er.Embeddings), len(inputs))
+		return nil, meta, fmt.Errorf("ollama embed devolvió %d vectores para %d entradas", len(er.Embeddings), len(inputs))
 	}
-	return er.Embeddings, nil
+	tokensIn = er.PromptEvalCount
+	loadDur = time.Duration(er.LoadDuration)
+	return er.Embeddings, meta, nil
+}
+
+// emit completa los campos de error y despacha el evento al Recorder.
+func (c *Client) emit(ev Event, err error) {
+	if c.record == nil {
+		return
+	}
+	if err != nil {
+		ev.ErrorKind = ClassifyError(err)
+		ev.Error = sanitizeText(err.Error())
+		if httpErr, ok := errors.AsType[*HTTPError](err); ok {
+			ev.HTTPStatus = httpErr.StatusCode
+		}
+	}
+	c.record(ev)
+}
+
+// ClassifyError agrupa un error de llamada a Ollama en una categoría estable
+// para métricas: validation, http_400, http_404, http_429, http_5xx,
+// http_other, canceled, timeout, connection_reset, refused, eof, other.
+func ClassifyError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if _, ok := errors.AsType[*ValidationError](err); ok {
+		return "validation"
+	}
+	if httpErr, ok := errors.AsType[*HTTPError](err); ok {
+		switch {
+		case httpErr.StatusCode == http.StatusBadRequest:
+			return "http_400"
+		case httpErr.StatusCode == http.StatusNotFound:
+			return "http_404"
+		case httpErr.StatusCode == http.StatusTooManyRequests:
+			return "http_429"
+		case httpErr.StatusCode >= 500:
+			return "http_5xx"
+		default:
+			return "http_other"
+		}
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, syscall.ECONNRESET) || strings.Contains(err.Error(), "connection reset") {
+		return "connection_reset"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "refused"
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "eof"
+	}
+	return "other"
 }
 
 // EmbedOne es un atajo para una única entrada (p.ej. la pregunta del usuario).
 func (c *Client) EmbedOne(ctx context.Context, model, input string) ([]float32, error) {
-	vecs, err := c.Embed(ctx, model, []string{input})
+	vec, _, err := c.EmbedOneMeta(ctx, model, input)
+	return vec, err
+}
+
+// EmbedOneMeta vectoriza una única entrada devolviendo los metadatos de la
+// llamada (tokens autoritativos, latencia, recarga del modelo).
+func (c *Client) EmbedOneMeta(ctx context.Context, model, input string) ([]float32, EmbedMeta, error) {
+	vecs, meta, err := c.EmbedWithMeta(ctx, model, []string{input})
 	if err != nil {
-		return nil, err
+		return nil, meta, err
 	}
-	return vecs[0], nil
+	return vecs[0], meta, nil
 }
 
 // WarmEmbed precarga el modelo de embeddings y comprueba que responde de
 // verdad: un GET / al host no demuestra que el runner del modelo esté listo.
 func (c *Client) WarmEmbed(ctx context.Context, model string) error {
-	vecs, err := c.Embed(ctx, model, []string{"warmup"})
+	vecs, err := c.Embed(WithPurpose(ctx, "warmup"), model, []string{"warmup"})
 	if err != nil {
 		return fmt.Errorf("precalentar modelo de embeddings %q: %w", model, err)
 	}
@@ -186,8 +296,9 @@ func (c *Client) WarmEmbed(ctx context.Context, model string) error {
 // postWithRetry ejecuta el POST recreando el cuerpo en cada intento.
 // Reintenta solo fallos transitorios (reset/EOF/timeout de red y HTTP
 // 429/502/503/504) con backoff exponencial acotado y jitter. Un HTTP 400
-// nunca se reintenta: se devuelve tipado con su cuerpo saneado.
-func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, batchSize int) ([]byte, error) {
+// nunca se reintenta: se devuelve tipado con su cuerpo saneado. Devuelve
+// además el nº de intentos consumidos, para las métricas de reintentos.
+func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, batchSize int) ([]byte, int, error) {
 	var lastErr error
 	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
 		start := time.Now()
@@ -198,7 +309,7 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 				log.Printf("ollama embed: recuperado en el intento %d (lote=%d bytes=%d latencia=%s)",
 					attempt, batchSize, len(payload), latency)
 			}
-			return respBody, nil
+			return respBody, attempt, nil
 		}
 		lastErr = err
 
@@ -209,10 +320,10 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 					log.Printf("ollama embed: HTTP %d sin reintento (lote=%d bytes=%d latencia=%s intento=%d cuerpo=%q)",
 						httpErr.StatusCode, batchSize, len(payload), latency, attempt, httpErr.Body)
 				}
-				return nil, err
+				return nil, attempt, err
 			}
 		} else if !isTransient(err) {
-			return nil, err
+			return nil, attempt, err
 		}
 		if attempt == c.maxAttempts {
 			break
@@ -223,10 +334,10 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, attempt, ctx.Err()
 		}
 	}
-	return nil, fmt.Errorf("ollama embed: agotados %d intentos: %w", c.maxAttempts, lastErr)
+	return nil, c.maxAttempts, fmt.Errorf("ollama embed: agotados %d intentos: %w", c.maxAttempts, lastErr)
 }
 
 // postOnce realiza un único intento y garantiza el cierre del cuerpo.
@@ -310,7 +421,7 @@ func (c *Client) embedLegacy(ctx context.Context, model string, inputs []string)
 		if err != nil {
 			return nil, err
 		}
-		respBody, err := c.postWithRetry(ctx, c.baseURL()+"/api/embeddings", payload, 1)
+		respBody, _, err := c.postWithRetry(ctx, c.baseURL()+"/api/embeddings", payload, 1)
 		if err != nil {
 			return nil, err
 		}

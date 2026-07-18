@@ -26,9 +26,20 @@ func main() {
 	model := flag.String("model", cfg.ModelName, "default Ollama model name")
 	flag.Parse()
 
-	cfg.WebPort = config.NormalizePort(*port)
-	cfg.OllamaAPI = *ollama
-	cfg.ModelName = *model
+	// Al sobrescribir por flag, se refleja la procedencia (página de
+	// configuración del dashboard de operaciones).
+	if p := config.NormalizePort(*port); p != cfg.WebPort {
+		cfg.Sources["WEB_PORT"] = "flag"
+		cfg.WebPort = p
+	}
+	if *ollama != cfg.OllamaAPI {
+		cfg.Sources["OLLAMA_API"] = "flag"
+		cfg.OllamaAPI = *ollama
+	}
+	if *model != cfg.ModelName {
+		cfg.Sources["MODEL_NAME"] = "flag"
+		cfg.ModelName = *model
+	}
 
 	srv := server.New(cfg)
 

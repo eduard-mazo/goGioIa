@@ -44,6 +44,16 @@ type Config struct {
 	OracleHost     string
 	OraclePort     int
 	OracleSID      string
+
+	// ── Dashboard de operaciones ───────────────────────────────────────────
+	// OpsHealthTTLSeconds cachea el resultado de las sondas de salud (Oracle,
+	// Ollama, readiness del modelo): la UI puede refrescar sin re-sondear.
+	OpsHealthTTLSeconds int
+
+	// Sources registra la procedencia de cada clave ("environment" |
+	// "default"; main.go la sube a "flag" si un flag la sobrescribe). La
+	// consume la página de configuración del dashboard de operaciones.
+	Sources map[string]string
 }
 
 // Defaults. Override any of these with the matching environment variable.
@@ -65,6 +75,8 @@ const (
 	defaultChunkSize        = 1800 // ~450 tokens por chunk
 	defaultChunkOverlap     = 250
 
+	defaultOpsHealthTTL = 60 // segundos
+
 	defaultOracleUser     = ""
 	defaultOraclePassword = ""
 	defaultOracleHost     = "127.0.0.1"
@@ -73,7 +85,27 @@ const (
 )
 
 // Load builds a Config from the environment, applying defaults where unset.
+// Junto a cada valor se registra su procedencia en Sources.
 func Load() Config {
+	sources := map[string]string{}
+	env := func(key, fallback string) string {
+		if v := os.Getenv(key); v != "" {
+			sources[key] = "environment"
+			return v
+		}
+		sources[key] = "default"
+		return fallback
+	}
+	envInt := func(key string, fallback int) int {
+		if v := os.Getenv(key); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				sources[key] = "environment"
+				return n
+			}
+		}
+		sources[key] = "default"
+		return fallback
+	}
 	return Config{
 		OllamaAPI: env("OLLAMA_API", defaultOllamaAPI),
 		WebPort:   NormalizePort(env("WEB_PORT", defaultWebPort)),
@@ -90,28 +122,24 @@ func Load() Config {
 		ChunkSize:        envInt("RAG_CHUNK_SIZE", defaultChunkSize),
 		ChunkOverlap:     envInt("RAG_CHUNK_OVERLAP", defaultChunkOverlap),
 
+		OpsHealthTTLSeconds: envInt("OPS_HEALTH_TTL", defaultOpsHealthTTL),
+
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),
 		OracleHost:     env("ORACLE_HOST", defaultOracleHost),
 		OraclePort:     envInt("ORACLE_PORT", defaultOraclePort),
 		OracleSID:      env("ORACLE_SID", defaultOracleSID),
+
+		Sources: sources,
 	}
 }
 
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+// Source devuelve la procedencia registrada de una clave de configuración.
+func (c Config) Source(key string) string {
+	if s, ok := c.Sources[key]; ok {
+		return s
 	}
-	return fallback
-}
-
-func envInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return fallback
+	return "default"
 }
 
 // NormalizePort ensures the port string is prefixed with ":".

@@ -27,7 +27,9 @@ type chatRequest struct {
 	Options  map[string]any `json:"options,omitempty"` // e.g. num_ctx, temperature
 }
 
-// ChatChunk is one NDJSON line emitted by Ollama while streaming.
+// ChatChunk is one NDJSON line emitted by Ollama while streaming. The final
+// line (done=true) carries the authoritative token counts and timings that
+// feed the operations dashboard; intermediate lines leave them at zero.
 type ChatChunk struct {
 	Message struct {
 		Role    string `json:"role"`
@@ -35,6 +37,14 @@ type ChatChunk struct {
 	} `json:"message"`
 	Done  bool   `json:"done"`
 	Error string `json:"error,omitempty"`
+
+	Model           string `json:"model,omitempty"`
+	DoneReason      string `json:"done_reason,omitempty"`
+	TotalDuration   int64  `json:"total_duration,omitempty"` // ns
+	LoadDuration    int64  `json:"load_duration,omitempty"`  // ns
+	PromptEvalCount int    `json:"prompt_eval_count,omitempty"`
+	EvalCount       int    `json:"eval_count,omitempty"`
+	EvalDuration    int64  `json:"eval_duration,omitempty"` // ns
 }
 
 // Ajustes por defecto del cliente; se cambian con las Option de New.
@@ -44,6 +54,30 @@ const (
 	defaultMaxAttempts      = 4    // intentos por llamada de embeddings
 )
 
+// Event describe una llamada de embeddings ya terminada, para que el
+// observador configurado con WithRecorder la persista (dashboard de
+// operaciones). El cliente no conoce Oracle: solo emite el hecho.
+type Event struct {
+	Op           string        // "embed"
+	Purpose      string        // "ingest" | "query" | "warmup" (WithPurpose); "" si no se anotó
+	Ref          []byte        // id correlacionado (WithRef), p.ej. document_id
+	Model        string
+	OK           bool
+	HTTPStatus   int           // 0 si el fallo fue de transporte
+	ErrorKind    string        // ver ClassifyError
+	Error        string        // mensaje saneado (una línea, truncado)
+	Latency      time.Duration // total, reintentos incluidos
+	QueueWait    time.Duration // espera en el semáforo de concurrencia
+	Attempts     int
+	BatchSize    int
+	PayloadBytes int
+	TokensIn     int           // prompt_eval_count de Ollama (autoritativo); 0 si no llegó
+	LoadDuration time.Duration // >0 delata una (re)carga del modelo en esta llamada
+}
+
+// Recorder recibe los eventos de embeddings. Debe ser rápido y no bloquear.
+type Recorder func(Event)
+
 // Client talks to a single Ollama chat endpoint.
 type Client struct {
 	endpoint       string
@@ -52,6 +86,7 @@ type Client struct {
 	maxAttempts    int
 	embedMaxTokens int
 	embedKeepAlive string
+	record         Recorder
 }
 
 // Option ajusta el comportamiento del cliente al construirlo.
@@ -91,6 +126,49 @@ func WithMaxAttempts(n int) Option {
 		}
 	}
 }
+
+// WithRecorder registra un observador de eventos de embeddings.
+func WithRecorder(r Recorder) Option {
+	return func(c *Client) { c.record = r }
+}
+
+// Claves de contexto para atribuir las llamadas de embeddings en las métricas.
+type ctxKey int
+
+const (
+	ctxKeyPurpose ctxKey = iota
+	ctxKeyRef
+)
+
+// WithPurpose etiqueta las llamadas de embeddings hechas con este contexto
+// ("ingest", "query", "warmup") para atribuirlas en las métricas.
+func WithPurpose(ctx context.Context, purpose string) context.Context {
+	return context.WithValue(ctx, ctxKeyPurpose, purpose)
+}
+
+// WithRef correlaciona las llamadas de embeddings con un identificador de
+// negocio (p.ej. el document_id de una ingesta).
+func WithRef(ctx context.Context, ref []byte) context.Context {
+	return context.WithValue(ctx, ctxKeyRef, ref)
+}
+
+func ctxPurpose(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyPurpose).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func ctxRef(ctx context.Context) []byte {
+	if v, ok := ctx.Value(ctxKeyRef).([]byte); ok {
+		return v
+	}
+	return nil
+}
+
+// MaxAttempts expone el tope de intentos por llamada de embeddings (métricas
+// de agotamiento de reintentos y página de configuración).
+func (c *Client) MaxAttempts() int { return c.maxAttempts }
 
 // New returns a Client for the given fully-qualified chat endpoint URL.
 func New(endpoint string, opts ...Option) *Client {
@@ -172,42 +250,122 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
+// ModelInfo es un modelo instalado en el host (/api/tags).
+type ModelInfo struct {
+	Name          string `json:"name"`
+	Digest        string `json:"digest"`
+	SizeBytes     int64  `json:"sizeBytes"`
+	ParameterSize string `json:"parameterSize"`
+	Quantization  string `json:"quantization"`
+}
+
 // tagsResponse mirrors the fields we need from Ollama's /api/tags response.
 type tagsResponse struct {
 	Models []struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		Digest  string `json:"digest"`
+		Size    int64  `json:"size"`
+		Details struct {
+			ParameterSize     string `json:"parameter_size"`
+			QuantizationLevel string `json:"quantization_level"`
+		} `json:"details"`
 	} `json:"models"`
+}
+
+// Tags returns the models installed on the Ollama host with their digests.
+func (c *Client) Tags(ctx context.Context) ([]ModelInfo, error) {
+	var tr tagsResponse
+	if err := c.getJSON(ctx, "/api/tags", &tr); err != nil {
+		return nil, err
+	}
+	models := make([]ModelInfo, 0, len(tr.Models))
+	for _, m := range tr.Models {
+		if m.Name == "" {
+			continue
+		}
+		models = append(models, ModelInfo{
+			Name:          m.Name,
+			Digest:        m.Digest,
+			SizeBytes:     m.Size,
+			ParameterSize: m.Details.ParameterSize,
+			Quantization:  m.Details.QuantizationLevel,
+		})
+	}
+	return models, nil
 }
 
 // ListModels returns the names of the models installed on the Ollama host.
 func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	models, err := c.Tags(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(models))
+	for _, m := range models {
+		names = append(names, m.Name)
+	}
+	return names, nil
+}
+
+// RunningModel es un modelo cargado ahora mismo en el host (/api/ps).
+type RunningModel struct {
+	Name      string    `json:"name"`
+	Digest    string    `json:"digest"`
+	SizeVRAM  int64     `json:"sizeVram"`
+	SizeBytes int64     `json:"sizeBytes"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// psResponse mirrors the fields we need from Ollama's /api/ps response.
+type psResponse struct {
+	Models []struct {
+		Name      string    `json:"name"`
+		Digest    string    `json:"digest"`
+		Size      int64     `json:"size"`
+		SizeVRAM  int64     `json:"size_vram"`
+		ExpiresAt time.Time `json:"expires_at"`
+	} `json:"models"`
+}
+
+// ListRunning returns the models currently loaded on the Ollama host. On a
+// 2 GiB GPU this is the direct signal for model-eviction diagnosis: the
+// embeddings model disappearing between calls means it is being evicted.
+func (c *Client) ListRunning(ctx context.Context) ([]RunningModel, error) {
+	var pr psResponse
+	if err := c.getJSON(ctx, "/api/ps", &pr); err != nil {
+		return nil, err
+	}
+	models := make([]RunningModel, 0, len(pr.Models))
+	for _, m := range pr.Models {
+		models = append(models, RunningModel{
+			Name:      m.Name,
+			Digest:    m.Digest,
+			SizeVRAM:  m.SizeVRAM,
+			SizeBytes: m.Size,
+			ExpiresAt: m.ExpiresAt,
+		})
+	}
+	return models, nil
+}
+
+// getJSON GETs a host-root endpoint and decodes the JSON response.
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+"/api/tags", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+path, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama returned %s", resp.Status)
+		return fmt.Errorf("ollama returned %s", resp.Status)
 	}
-
-	var tr tagsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(tr.Models))
-	for _, m := range tr.Models {
-		if m.Name != "" {
-			names = append(names, m.Name)
-		}
-	}
-	return names, nil
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // baseURL strips the /api/... path from the configured endpoint, leaving the

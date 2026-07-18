@@ -219,3 +219,97 @@ func TestEmbedConcurrencyLimitedToOne(t *testing.T) {
 		t.Fatalf("esperaba como máximo 1 llamada simultánea, hubo %d", peak)
 	}
 }
+
+func TestClassifyError(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{nil, ""},
+		{&ValidationError{Reason: "x"}, "validation"},
+		{&HTTPError{StatusCode: 400, Body: "input length"}, "http_400"},
+		{&HTTPError{StatusCode: 429}, "http_429"},
+		{&HTTPError{StatusCode: 503}, "http_5xx"},
+		{fmt.Errorf("wrap: %w", &HTTPError{StatusCode: 404}), "http_404"},
+		{context.DeadlineExceeded, "timeout"},
+		{context.Canceled, "canceled"},
+		{errors.New("read tcp 1.2.3.4: connection reset by peer"), "connection_reset"},
+		{errors.New("algo raro"), "other"},
+	}
+	for _, c := range cases {
+		if got := ClassifyError(c.err); got != c.want {
+			t.Errorf("ClassifyError(%v) = %q, esperaba %q", c.err, got, c.want)
+		}
+	}
+}
+
+func TestEmbedEmitsRecorderEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"embeddings":[[0.1,0.2]],"prompt_eval_count":42,"load_duration":2000000000}`)
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var events []Event
+	c := New(srv.URL+"/api/chat", WithRecorder(func(ev Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	}))
+
+	ref := []byte{1, 2, 3}
+	ctx := WithPurpose(WithRef(context.Background(), ref), "ingest")
+	if _, err := c.Embed(ctx, "m", []string{"hola"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("esperaba 1 evento, hubo %d", len(events))
+	}
+	ev := events[0]
+	if !ev.OK || ev.Op != "embed" || ev.Purpose != "ingest" {
+		t.Fatalf("evento inesperado: %+v", ev)
+	}
+	if string(ev.Ref) != string(ref) {
+		t.Fatalf("ref no propagada: %v", ev.Ref)
+	}
+	if ev.TokensIn != 42 {
+		t.Fatalf("tokens autoritativos no capturados: %d", ev.TokensIn)
+	}
+	if ev.LoadDuration != 2*time.Second {
+		t.Fatalf("load_duration no capturado: %v", ev.LoadDuration)
+	}
+	if ev.Attempts != 1 || ev.BatchSize != 1 {
+		t.Fatalf("metadatos de llamada incorrectos: %+v", ev)
+	}
+}
+
+func TestEmbedEmitsErrorEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "input length exceeds maximum context length", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var events []Event
+	c := New(srv.URL+"/api/chat", WithRecorder(func(ev Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	}))
+
+	if _, err := c.Embed(context.Background(), "m", []string{"hola"}); err == nil {
+		t.Fatal("esperaba error")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("esperaba 1 evento, hubo %d", len(events))
+	}
+	ev := events[0]
+	if ev.OK || ev.ErrorKind != "http_400" || ev.HTTPStatus != 400 {
+		t.Fatalf("evento de error inesperado: %+v", ev)
+	}
+}

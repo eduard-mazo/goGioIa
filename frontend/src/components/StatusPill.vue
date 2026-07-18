@@ -7,8 +7,11 @@ const props = withDefaults(
     label?: string
     value?: string
     pulse?: boolean
+    /** Muestra la etiqueta también en pantallas pequeñas (por defecto se
+     * oculta bajo el breakpoint sm). */
+    alwaysLabel?: boolean
   }>(),
-  { state: 'idle', pulse: true },
+  { state: 'idle', pulse: true, alwaysLabel: false },
 )
 
 const tone = computed(() => {
@@ -49,8 +52,8 @@ const showPulse = computed(() => props.pulse && props.state === 'ok')
     </span>
     <span
       v-if="label"
-      class="hidden whitespace-nowrap text-[10px] font-bold uppercase tracking-[0.2em] sm:inline"
-      :class="state === 'idle' ? 'text-muted-foreground' : tone"
+      class="whitespace-nowrap text-[10px] font-bold uppercase tracking-[0.2em]"
+      :class="[alwaysLabel ? 'inline' : 'hidden sm:inline', state === 'idle' ? 'text-muted-foreground' : tone]"
     >
       {{ label }}
     </span>

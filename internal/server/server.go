@@ -38,15 +38,31 @@ func New(cfg config.Config) *Server {
 	if err != nil {
 		log.Printf("warning: embedded index.html missing (did you build the frontend?): %v", err)
 	}
-	ol := ollama.New(cfg.OllamaAPI,
-		ollama.WithEmbedConcurrency(cfg.EmbedConcurrency),
-		ollama.WithEmbedMaxTokens(cfg.EmbedMaxTokens),
-		ollama.WithEmbedKeepAlive(cfg.EmbedKeepAlive),
-	)
 	st, err := store.Open(cfg)
 	if err != nil {
 		log.Fatalf("open Oracle vector store: %v", err)
 	}
+	ol := ollama.New(cfg.OllamaAPI,
+		ollama.WithEmbedConcurrency(cfg.EmbedConcurrency),
+		ollama.WithEmbedMaxTokens(cfg.EmbedMaxTokens),
+		ollama.WithEmbedKeepAlive(cfg.EmbedKeepAlive),
+		// Cada llamada de embeddings queda registrada en rag_events para el
+		// dashboard de operaciones (latencias, errores, tokens, recargas).
+		ollama.WithRecorder(func(ev ollama.Event) {
+			tokenSource := ""
+			if ev.TokensIn > 0 {
+				tokenSource = "ollama"
+			}
+			st.RecordEvent(store.Event{
+				Kind: "embed", Ref: ev.Ref, Model: ev.Model, OK: ev.OK,
+				HTTPStatus: ev.HTTPStatus, ErrorKind: ev.ErrorKind, ErrorDetail: ev.Error,
+				Latency: ev.Latency, QueueWait: ev.QueueWait, Attempts: ev.Attempts,
+				BatchSize: ev.BatchSize, PayloadBytes: ev.PayloadBytes,
+				TokensIn: ev.TokensIn, TokenSource: tokenSource,
+				LoadDuration: ev.LoadDuration, Detail: ev.Purpose,
+			})
+		}),
+	)
 	// Bootstrap del esquema en segundo plano: si Oracle está caído en el
 	// arranque, cada petición RAG lo reintenta vía EnsureReady.
 	go func() {
@@ -83,6 +99,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/rag/documents/{id}", s.handleRagDeleteDocument)
 	mux.HandleFunc("POST /api/rag/ask", s.handleRagAsk)
 	mux.HandleFunc("POST /api/rag/feedback", s.handleRagFeedback)
+
+	// Dashboard de operaciones RAG (solo lectura, agregados server-side).
+	mux.HandleFunc("GET /api/rag/ops/health", s.handleOpsHealth)
+	mux.HandleFunc("GET /api/rag/ops/overview", s.handleOpsOverview)
+	mux.HandleFunc("GET /api/rag/ops/timeseries", s.handleOpsTimeseries)
+	mux.HandleFunc("GET /api/rag/ops/documents", s.handleOpsDocuments)
+	mux.HandleFunc("GET /api/rag/ops/documents/{id}", s.handleOpsDocumentDetail)
+	mux.HandleFunc("GET /api/rag/ops/queries", s.handleOpsQueries)
+	mux.HandleFunc("GET /api/rag/ops/queries/{id}", s.handleOpsQueryTrace)
+	mux.HandleFunc("GET /api/rag/ops/tokens", s.handleOpsTokens)
+	mux.HandleFunc("GET /api/rag/ops/models", s.handleOpsModels)
+	mux.HandleFunc("GET /api/rag/ops/integrity", s.handleOpsIntegrity)
+	mux.HandleFunc("GET /api/rag/ops/config", s.handleOpsConfig)
 
 	// Everything else is the SPA (static assets + client-side routes).
 	mux.Handle("/", s.staticHandler())

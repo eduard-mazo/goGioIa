@@ -21,10 +21,14 @@ import (
 	"goGioIa/internal/store"
 )
 
-// nomic-embed-text rinde mejor con estos prefijos de tarea.
+// Prefijos de tarea de nomic-embed-text (exportados: la página de
+// configuración del dashboard los muestra tal como se usan).
 const (
-	docPrefix   = "search_document: "
-	queryPrefix = "search_query: "
+	DocPrefix   = "search_document: "
+	QueryPrefix = "search_query: "
+
+	docPrefix   = DocPrefix
+	queryPrefix = QueryPrefix
 )
 
 // maxSplitDepth acota cuántas veces se parte por la mitad un chunk que
@@ -111,8 +115,16 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 	// Independiente de la petición HTTP: la ingesta sobrevive al upload.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+	// Las llamadas de embeddings de esta ingesta quedan atribuidas al
+	// documento en rag_events (dashboard de operaciones).
+	ctx = ollama.WithPurpose(ollama.WithRef(ctx, docID), "ingest")
 
+	started := time.Now()
 	docHex := hex.EncodeToString(docID)
+	stage := func(detail string, extra store.Event) {
+		extra.Kind, extra.Ref, extra.OK, extra.Detail = "ingest", docID, true, detail
+		s.store.RecordEvent(extra)
+	}
 	fail := func(stage string, err error) {
 		log.Printf("rag: ingesta doc=%s (%q) falló en %s: %v", docHex, fileName, stage, err)
 		msg := fmt.Sprintf("%s: %v", stage, err)
@@ -122,6 +134,11 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		if err := s.store.SetDocumentStatus(ctx, docID, store.StatusFailed, msg); err != nil {
 			log.Printf("rag: no se pudo marcar FAILED: %v", err)
 		}
+		s.store.RecordEvent(store.Event{
+			Kind: "ingest", Ref: docID, OK: false, Detail: "failed:" + stage,
+			ErrorKind: ollama.ClassifyError(err), ErrorDetail: err.Error(),
+			Latency: time.Since(started),
+		})
 	}
 
 	// 1. Extracción de texto (por página, para citar fuentes).
@@ -129,11 +146,14 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		fail("actualizar estado", err)
 		return
 	}
+	stage("start", store.Event{PayloadBytes: len(data)})
+	extractStart := time.Now()
 	pages, err := pdf.ExtractPages(data)
 	if err != nil {
 		fail("extracción de texto", err)
 		return
 	}
+	stage("extracted", store.Event{Latency: time.Since(extractStart), BatchSize: len(pages)})
 	for _, p := range pages {
 		if p.Text == "" {
 			continue
@@ -156,6 +176,7 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		fail("actualizar estado", err)
 		return
 	}
+	stage("chunked", store.Event{BatchSize: len(chunks), TokensIn: estimateChunksTokens(chunks), TokenSource: "estimated"})
 
 	// 3. Reanudación: se salta lo ya embebido en intentos anteriores.
 	done, err := s.store.EmbeddedChunkIndexes(ctx, docID)
@@ -204,7 +225,17 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		fail("finalizar documento", err)
 		return
 	}
+	stage("done", store.Event{Latency: time.Since(started), BatchSize: len(chunks)})
 	log.Printf("rag: doc=%s (%q) ingerido (%d páginas, %d chunks)", docHex, fileName, len(pages), len(chunks))
+}
+
+// estimateChunksTokens suma los tokens estimados de un lote de chunks.
+func estimateChunksTokens(chunks []chunk) int {
+	total := 0
+	for _, c := range chunks {
+		total += estimateTokens(c.Text)
+	}
+	return total
 }
 
 // pendingChunks filtra los chunks cuyo índice ya tiene embedding persistido.
@@ -344,16 +375,19 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	}
 
 	// 1. Embedding de la consulta (mismo espacio vectorial que los chunks).
-	qVec, err := s.ollama.EmbedOne(ctx, s.cfg.EmbedModel, queryPrefix+question)
+	qVec, embedMeta, err := s.ollama.EmbedOneMeta(
+		ollama.WithPurpose(ctx, "query"), s.cfg.EmbedModel, queryPrefix+question)
 	if err != nil {
 		return nil, fmt.Errorf("vectorizar la pregunta: %w", err)
 	}
 
 	// 2. Retrieval por similitud coseno.
+	retrievalStart := time.Now()
 	sources, err := s.store.SearchChunks(ctx, qVec, s.cfg.RAGTopK)
 	if err != nil {
 		return nil, fmt.Errorf("búsqueda vectorial: %w", err)
 	}
+	retrievalLatency := time.Since(retrievalStart)
 
 	// 3. Prompt desde la plantilla activa (versionada en prompt_templates).
 	templateID, templateText, err := s.store.ActiveTemplate(ctx, "")
@@ -370,6 +404,28 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 	if err := s.store.LogRetrievedChunks(ctx, queryID, sources); err != nil {
 		log.Printf("rag: no se pudieron registrar los chunks recuperados: %v", err)
 	}
+
+	// Eventos correlacionados con la consulta (dashboard de operaciones).
+	// El evento «embed» sin ref del Recorder cubre la métrica de infraestructura;
+	// estos dos aportan la correlación query_id y el desglose por etapa.
+	queryTokens, tokenSource := embedMeta.Tokens, "ollama"
+	if queryTokens == 0 {
+		queryTokens, tokenSource = estimateTokens(queryPrefix+question), "estimated"
+	}
+	s.store.RecordEvent(store.Event{
+		Kind: "query_embed", Ref: queryID, Model: s.cfg.EmbedModel, OK: true,
+		Latency: embedMeta.Latency, Attempts: embedMeta.Attempts,
+		TokensIn: queryTokens, TokenSource: tokenSource, LoadDuration: embedMeta.LoadDuration,
+	})
+	topScore := 0.0
+	if len(sources) > 0 {
+		topScore = sources[0].Similarity
+	}
+	s.store.RecordEvent(store.Event{
+		Kind: "retrieval", Ref: queryID, OK: true,
+		Latency: retrievalLatency, BatchSize: len(sources),
+		Detail: fmt.Sprintf("topK=%d topScore=%.4f", s.cfg.RAGTopK, topScore),
+	})
 
 	return &Prepared{
 		QueryID:  hex.EncodeToString(queryID),

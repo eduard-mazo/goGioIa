@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"goGioIa/internal/ollama"
 	"goGioIa/internal/pdf"
@@ -89,8 +91,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx)
 
+	genStart := time.Now()
 	body, err := s.ollama.Stream(r.Context(), model, req.Messages, req.Options)
 	if err != nil {
+		s.recordGeneration("", model, "chat", genStart, nil, err)
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()
 		return
@@ -109,6 +113,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			continue // skip malformed lines
 		}
 		if chunk.Error != "" {
+			s.recordGeneration("", model, "chat", genStart, nil, errors.New(chunk.Error))
 			writeSSE(w, "error", map[string]string{"error": chunk.Error})
 			flusher.Flush()
 			return
@@ -118,12 +123,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 		if chunk.Done {
+			s.recordGeneration("", model, "chat", genStart, &chunk, nil)
 			writeSSE(w, "done", map[string]bool{"done": true})
 			flusher.Flush()
 			return
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		s.recordGeneration("", model, "chat", genStart, nil, err)
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		flusher.Flush()
 	}

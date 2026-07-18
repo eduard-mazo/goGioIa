@@ -83,6 +83,43 @@ var schemaDDL = []string{
     created_at    TIMESTAMP DEFAULT SYSTIMESTAMP,
     CONSTRAINT uq_prompt_name_ver UNIQUE (name, version)
 )`,
+
+	// ── Observabilidad (dashboard de operaciones RAG) ────────────────────
+	// Un evento por operación terminada. kind:
+	//   embed      → cada llamada de embeddings a Ollama (detail = ingest|query|warmup)
+	//   query_embed→ vectorización de una pregunta, ref = query_id
+	//   retrieval  → búsqueda vectorial de una pregunta, ref = query_id
+	//   generation → generación de una respuesta (detail = rag|chat), ref = query_id
+	//   ingest     → hito del pipeline de un documento (detail = etapa), ref = document_id
+	// token_source distingue conteos autoritativos de Ollama ('ollama') de
+	// estimaciones por caracteres ('estimated'); nunca se suman sin etiquetar.
+	`CREATE TABLE rag_events (
+    event_id      RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    kind          VARCHAR2(40) NOT NULL,
+    ref_id        RAW(16),
+    model         VARCHAR2(100),
+    status        VARCHAR2(10) DEFAULT 'OK' NOT NULL,
+    http_status   NUMBER,
+    error_kind    VARCHAR2(40),
+    error_detail  VARCHAR2(2000),
+    latency_ms    NUMBER,
+    queue_ms      NUMBER,
+    attempts      NUMBER,
+    batch_size    NUMBER,
+    payload_bytes NUMBER,
+    tokens_in     NUMBER,
+    tokens_out    NUMBER,
+    token_source  VARCHAR2(20),
+    load_ms       NUMBER,
+    detail        VARCHAR2(1000),
+    created_at    TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT ck_rag_events_status CHECK (status IN ('OK','ERROR'))
+)`,
+
+	`CREATE INDEX ix_rag_events_kind_time ON rag_events (kind, created_at)`,
+	`CREATE INDEX ix_rag_events_ref ON rag_events (ref_id)`,
+	`CREATE INDEX ix_rag_queries_created ON rag_queries (created_at)`,
+	`CREATE INDEX ix_documents_uploaded ON documents (uploaded_at)`,
 }
 
 // El índice vectorial requiere vector_memory_size configurado en la instancia;

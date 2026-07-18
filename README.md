@@ -57,6 +57,15 @@ goGioIa/
 | DELETE | `/api/rag/documents/{id}` | Remove a document and its vectors                |
 | POST   | `/api/rag/ask`            | RAG answer, streamed as SSE (sources → tokens)   |
 | POST   | `/api/rag/feedback`       | Rate an answer (-1/0/1) → `rag_feedback`         |
+| GET    | `/api/rag/ops/health`     | Component health (cached, `OPS_HEALTH_TTL`)      |
+| GET    | `/api/rag/ops/overview`   | Dashboard summary cards (`?hours=&weak=`)        |
+| GET    | `/api/rag/ops/timeseries` | Bucketed series: embeds, tokens, latency, errors |
+| GET    | `/api/rag/ops/documents`  | Paginated ingestion table (+`/{id}` detail)      |
+| GET    | `/api/rag/ops/queries`    | Paginated query runs (+`/{id}` full trace)       |
+| GET    | `/api/rag/ops/tokens`     | Token usage by category, model and document      |
+| GET    | `/api/rag/ops/models`     | Ollama tags/ps + per-model metrics from events   |
+| GET    | `/api/rag/ops/integrity`  | Read-only corpus consistency checks              |
+| GET    | `/api/rag/ops/config`     | Effective config with source, secrets redacted   |
 | GET    | `/*`                      | Embedded SPA (with client-side route fallback)   |
 
 ## RAG — asistente con base de conocimiento (Oracle 23ai)
@@ -93,6 +102,28 @@ El esquema se crea automáticamente en el primer arranque (ver
 (`ORGANIZATION INMEMORY NEIGHBOR GRAPH`) requiere `vector_memory_size` en la
 instancia; si no está disponible, la búsqueda funciona en modo exacto.
 
+### Operaciones RAG (dashboard)
+
+El botón **Operaciones RAG** de la cabecera (o el enlace `#/ops/overview`)
+abre el dashboard de observabilidad: resumen con salud por componente,
+ingesta, tokens y uso, calidad del retrieval, consultas con traza completa,
+modelos/Ollama, integridad de datos y configuración efectiva.
+
+- Cada operación del pipeline (llamada de embeddings, retrieval, generación,
+  hito de ingesta) queda registrada en la tabla `rag_events`, correlacionada
+  por `document_id`/`query_id`. El registro es best-effort: nunca bloquea ni
+  tumba el pipeline.
+- Los conteos de tokens distinguen su fuente: **exacto** (reportado por
+  Ollama: `prompt_eval_count`/`eval_count`) o **estimado** (~4 caracteres por
+  token); nunca se combinan sin etiquetar. No se muestran costes: no hay
+  configuración de precios.
+- La salud del modelo de embeddings se deriva de la actividad reciente y solo
+  se sonda (1 token, cacheado `OPS_HEALTH_TTL`) si no la hay; el modelo de
+  generación no se sonda para no desalojar el de embeddings de la GPU.
+- La página de modelos expone las señales del incidente típico de una GPU
+  pequeña: (re)cargas del modelo (`load_duration`), esperas del semáforo de
+  concurrencia, resets de conexión, HTTP 400 por tamaño y reintentos.
+
 ## Configuration
 
 Defaults live in `internal/config/config.go` and can be overridden by env vars:
@@ -107,6 +138,7 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `RAG_TOP_K`         | `5`                                 | Chunks retrieved per question        |
 | `RAG_CHUNK_SIZE`    | `1800`                              | Chunk size (characters)              |
 | `RAG_CHUNK_OVERLAP` | `250`                               | Chunk overlap (characters)           |
+| `OPS_HEALTH_TTL`    | `60`                                | Ops-dashboard health cache (seconds) |
 | `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
 | `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
 | `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |
