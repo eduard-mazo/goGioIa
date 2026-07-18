@@ -45,8 +45,13 @@ const dark = ref(true)
 const collapsed = ref(false)
 const mobileOpen = ref(false)
 const showKnowledge = ref(false)
-// Área de Operaciones RAG: se abre desde la cabecera o con un enlace #/ops/…
-const showOps = ref(window.location.hash.startsWith('#/ops'))
+// Área de Operaciones RAG: se abre desde la cabecera o con una ruta /ops/…
+// (el servidor sirve index.html para cualquier ruta: deep-links reales).
+const showOps = ref(window.location.pathname.startsWith('/ops'))
+
+function onPopstate() {
+  showOps.value = window.location.pathname.startsWith('/ops')
+}
 const scrollEl = ref<HTMLElement | null>(null)
 
 const isOffline = computed(() => health.value?.ollama === 'offline')
@@ -63,6 +68,7 @@ onMounted(async () => {
   collapsed.value = localStorage.getItem('gogioia:collapsed') === '1'
   applyTheme()
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('popstate', onPopstate)
   try {
     const cfg = await fetchConfig()
     model.value = cfg.model
@@ -77,7 +83,10 @@ onMounted(async () => {
   window.setInterval(refreshHealth, 15_000)
 })
 
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('popstate', onPopstate)
+})
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {

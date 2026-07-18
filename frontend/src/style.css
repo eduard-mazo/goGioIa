@@ -46,8 +46,11 @@
 
   /* Series de charts (dashboard de operaciones). Par azul/rojo validado
      contra deuteranopia/protanopia (script dataviz): el par verde/rojo de la
-     marca colapsa con ΔE 4.8 y no es apto para series. */
+     marca colapsa con ΔE 4.8 y no es apto para series. --chart-main-soft es
+     el paso 2 de la misma rampa azul (ordinal validada: monotonía de L y
+     ≥2:1 sobre la superficie) para pares subida/bajada del mismo carril. */
   --chart-main: #2a78d6;
+  --chart-main-soft: #6ea3e3;
   --chart-fail: #d8402a;
 
   /* Barra lateral — lienzo bosque con destellos cítrico. */
@@ -89,6 +92,7 @@
 
   /* Pasos oscuros del par de series, validados sobre #0e1712. */
   --chart-main: #4a90d9;
+  --chart-main-soft: #2c5d92;
   --chart-fail: #e0654f;
 
   --sidebar: #0a1510;

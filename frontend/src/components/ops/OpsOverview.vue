@@ -4,6 +4,7 @@
 import { computed, ref, watch } from 'vue'
 import StatusPill from '../StatusPill.vue'
 import MetricCard from './MetricCard.vue'
+import TokenTransit from './TokenTransit.vue'
 import LineChart from './LineChart.vue'
 import HBarChart from './HBarChart.vue'
 import {
@@ -228,13 +229,14 @@ const dErrors = computed(() => {
           clickable
           @open="emit('navigate', 'retrieval')"
         />
-        <MetricCard
-          label="Tokens procesados"
-          :value="fmtNum((overview?.embeds.tokensIn ?? 0) + (overview?.generation.tokensIn ?? 0) + (overview?.generation.tokensOut ?? 0))"
-          :sub="`fuente: ${t.ops.tokenSource.badgeOllama}`"
-          hint="Tokens de embeddings + prompt + respuesta contados por Ollama en el rango"
+        <TokenTransit
+          class="col-span-2"
+          :up="overview?.tokens.up ?? 0"
+          :down="overview?.tokens.down ?? 0"
+          :up-all="overview?.tokens.upAll ?? 0"
+          :down-all="overview?.tokens.downAll ?? 0"
+          :hours="hours"
           :empty="!overview"
-          clickable
           @open="emit('navigate', 'tokens')"
         />
         <MetricCard

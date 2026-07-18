@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // Área «Operaciones RAG»: contenedor a pantalla completa con navegación
 // interna de 8 vistas. La app no usa vue-router (SPA de una vista); la
-// navegación se sincroniza con location.hash (#/ops/<vista>) para que los
-// enlaces sean compartibles y el botón atrás funcione.
+// navegación usa rutas reales (/ops/<vista>) vía History API — el fallback
+// SPA del servidor Go sirve index.html para cualquier ruta, así que los
+// enlaces profundos y el botón atrás funcionan sin hash.
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   Activity,
@@ -59,8 +60,8 @@ const ranges = [
   { value: 168, label: t.ops.range.h168 },
 ]
 
-function readHash() {
-  const m = window.location.hash.match(/^#\/ops\/?([a-z]*)/)
+function readPath() {
+  const m = window.location.pathname.match(/^\/ops\/?([a-z]*)/)
   if (!m) return
   const v = views.find((x) => x.id === m[1])
   current.value = v ? v.id : 'overview'
@@ -68,22 +69,29 @@ function readHash() {
 
 function go(view: ViewId) {
   current.value = view
-  window.history.replaceState(null, '', `#/ops/${view}`)
+  window.history.pushState(null, '', `/ops/${view}`)
 }
 
 function close() {
-  window.history.replaceState(null, '', window.location.pathname)
+  window.history.pushState(null, '', '/')
   emit('close')
 }
 
+function onPopstate() {
+  // Si el usuario retrocede fuera de /ops, App.vue cierra el área.
+  if (window.location.pathname.startsWith('/ops')) readPath()
+}
+
 onMounted(() => {
-  readHash()
-  if (!window.location.hash.startsWith('#/ops')) {
-    window.history.replaceState(null, '', '#/ops/overview')
+  if (window.location.pathname.startsWith('/ops')) {
+    readPath()
+  } else {
+    // Abierta desde la cabecera: entrada nueva para que «atrás» vuelva al chat.
+    window.history.pushState(null, '', '/ops/overview')
   }
-  window.addEventListener('hashchange', readHash)
+  window.addEventListener('popstate', onPopstate)
 })
-onBeforeUnmount(() => window.removeEventListener('hashchange', readHash))
+onBeforeUnmount(() => window.removeEventListener('popstate', onPopstate))
 
 const currentView = computed(() => {
   switch (current.value) {

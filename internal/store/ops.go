@@ -57,6 +57,18 @@ type Overview struct {
 	Generation OpAgg   `json:"generation"` // kind=generation
 	ErrorRate  float64 `json:"errorRate"`  // errores/total sobre todos los kinds de llamada
 
+	// Tránsito de tokens (fuente: ollama, solo llamadas OK). Subida = tokens
+	// enviados al modelo (embeddings de ingesta + embedding de la pregunta +
+	// prompt de generación); bajada = tokens generados. Sin dobles conteos:
+	// los eventos embed con detail='query' se excluyen porque query_embed ya
+	// contabiliza esos mismos tokens, y los warmup no son trabajo de negocio.
+	Tokens struct {
+		Up      int64 `json:"up"`      // rango
+		Down    int64 `json:"down"`    // rango
+		UpAll   int64 `json:"upAll"`   // histórico completo
+		DownAll int64 `json:"downAll"` // histórico completo
+	} `json:"tokens"`
+
 	// Período anterior equivalente: solo para deltas reales, nunca inventados.
 	Prev struct {
 		HasData       bool  `json:"hasData"`
@@ -177,6 +189,13 @@ func (s *Store) OpsOverview(ctx context.Context, hours int, weakThreshold float6
 		Scan(&evTotal, &evErr); err != nil {
 		return nil, fmt.Errorf("tasa de error: %w", err)
 	}
+
+	if ov.Tokens.Up, ov.Tokens.Down, err = s.tokenTransit(ctx, hours); err != nil {
+		return nil, fmt.Errorf("tránsito de tokens (rango): %w", err)
+	}
+	if ov.Tokens.UpAll, ov.Tokens.DownAll, err = s.tokenTransit(ctx, 0); err != nil {
+		return nil, fmt.Errorf("tránsito de tokens (histórico): %w", err)
+	}
 	if evTotal > 0 {
 		ov.ErrorRate = float64(evErr) / float64(evTotal)
 	}
@@ -203,6 +222,28 @@ func (s *Store) OpsOverview(ctx context.Context, hours int, weakThreshold float6
 	ov.Prev.HasData = ov.Prev.Queries > 0 || ov.Prev.EmbedRequests > 0
 
 	return ov, nil
+}
+
+// tokenTransit suma los tokens de subida (enviados al modelo) y bajada
+// (generados) de las llamadas correctas. hours = 0 → histórico completo.
+// Fuente única por categoría para no contar dos veces: embeddings de ingesta
+// (kind=embed, detail=ingest), embedding de pregunta (kind=query_embed) y
+// generación (kind=generation, RAG y chat).
+func (s *Store) tokenTransit(ctx context.Context, hours int) (up, down int64, err error) {
+	q := `
+		SELECT NVL(SUM(CASE WHEN (kind = 'embed' AND NVL(detail, ' ') = 'ingest')
+		                      OR kind IN ('query_embed', 'generation')
+		                    THEN NVL(tokens_in, 0) ELSE 0 END), 0),
+		       NVL(SUM(CASE WHEN kind = 'generation' THEN NVL(tokens_out, 0) ELSE 0 END), 0)
+		FROM rag_events
+		WHERE status = 'OK'`
+	if hours > 0 {
+		err = s.db.QueryRowContext(ctx,
+			q+` AND created_at >= SYSTIMESTAMP - NUMTODSINTERVAL(:1, 'HOUR')`, hours).Scan(&up, &down)
+	} else {
+		err = s.db.QueryRowContext(ctx, q).Scan(&up, &down)
+	}
+	return up, down, err
 }
 
 func (s *Store) opAgg(ctx context.Context, kind string, hours int, dst *OpAgg) error {

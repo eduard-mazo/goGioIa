@@ -50,6 +50,7 @@ export interface OpsOverview {
   embeds: OpAgg
   generation: OpAgg
   errorRate: number
+  tokens: { up: number; down: number; upAll: number; downAll: number }
   prev: {
     hasData: boolean
     queries: number

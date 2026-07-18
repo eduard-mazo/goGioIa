@@ -104,8 +104,9 @@ instancia; si no está disponible, la búsqueda funciona en modo exacto.
 
 ### Operaciones RAG (dashboard)
 
-El botón **Operaciones RAG** de la cabecera (o el enlace `#/ops/overview`)
-abre el dashboard de observabilidad: resumen con salud por componente,
+El botón **Operaciones RAG** de la cabecera (o la ruta `/ops/overview` —
+enlaces profundos reales vía el fallback SPA) abre el dashboard de
+observabilidad: resumen con salud por componente,
 ingesta, tokens y uso, calidad del retrieval, consultas con traza completa,
 modelos/Ollama, integridad de datos y configuración efectiva.
 
