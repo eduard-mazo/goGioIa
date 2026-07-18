@@ -112,15 +112,20 @@ func (s *Store) OpsOverview(ctx context.Context, hours int, weakThreshold float6
 		return nil, err
 	}
 
+	// COUNT(col) directo sobre VECTOR falla con ORA-22849 (y sobre CLOB con
+	// ORA-00932): se cuenta vía CASE + IS NOT NULL, que no toca el tipo.
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COUNT(embedding), NVL(SUM(token_count), 0) FROM document_chunks`).
+		SELECT COUNT(*),
+		       NVL(SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END), 0),
+		       NVL(SUM(token_count), 0)
+		FROM document_chunks`).
 		Scan(&ov.Chunks.Total, &ov.Chunks.Embedded, &ov.Chunks.EstTokens); err != nil {
 		return nil, fmt.Errorf("agregado de chunks: %w", err)
 	}
 	ov.Chunks.Missing = ov.Chunks.Total - ov.Chunks.Embedded
 
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COUNT(response_text)
+		SELECT COUNT(*), NVL(SUM(CASE WHEN response_text IS NOT NULL THEN 1 ELSE 0 END), 0)
 		FROM rag_queries WHERE created_at >= SYSTIMESTAMP - NUMTODSINTERVAL(:1, 'HOUR')`, hours).
 		Scan(&ov.Queries.Total, &ov.Queries.Answered); err != nil {
 		return nil, fmt.Errorf("agregado de consultas: %w", err)
@@ -519,7 +524,8 @@ func (s *Store) OpsDocuments(ctx context.Context, f DocFilter) (*DocPage, error)
 	const fromSQL = `
 	FROM documents d
 	LEFT JOIN (
-		SELECT document_id, COUNT(*) chunks, COUNT(embedding) embedded,
+		SELECT document_id, COUNT(*) chunks,
+		       SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) embedded,
 		       SUM(NVL(token_count, 0)) est_tokens,
 		       MIN(token_count) min_t, MAX(token_count) max_t,
 		       LISTAGG(DISTINCT embedding_model, ',') models
@@ -645,7 +651,8 @@ func (s *Store) OpsDocumentDetail(ctx context.Context, id []byte, tokenLimit int
 		       NVL(c.min_t, 0), NVL(c.max_t, 0), NVL(c.models, ' ')
 		FROM documents d
 		LEFT JOIN (
-			SELECT document_id, COUNT(*) chunks, COUNT(embedding) embedded,
+			SELECT document_id, COUNT(*) chunks,
+		       SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) embedded,
 			       SUM(NVL(token_count, 0)) est_tokens,
 			       MIN(token_count) min_t, MAX(token_count) max_t,
 			       LISTAGG(DISTINCT embedding_model, ',') models
@@ -1499,7 +1506,8 @@ func (s *Store) OpsIntegrity(ctx context.Context, activeModel string, tokenLimit
 		{"docs_failed_con_avance", `
 			SELECT d.file_name || ' (' || cnt.n || ' chunks listos)', COUNT(*) OVER ()
 			FROM documents d
-			JOIN (SELECT document_id, COUNT(embedding) n FROM document_chunks GROUP BY document_id) cnt
+			JOIN (SELECT document_id, SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) n
+			      FROM document_chunks GROUP BY document_id) cnt
 			  ON cnt.document_id = d.document_id
 			WHERE d.status = 'FAILED' AND cnt.n > 0
 			FETCH FIRST 10 ROWS ONLY`, nil},
