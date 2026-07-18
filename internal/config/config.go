@@ -19,8 +19,19 @@ type Config struct {
 	// ── RAG ────────────────────────────────────────────────────────────────
 	// EmbedModel is the Ollama embeddings model (768 dims → VECTOR(768)).
 	EmbedModel string
+	// EmbedMaxTokens is the embedding model's context window (n_ctx_train);
+	// inputs are validated against it and num_ctx is pinned to this value.
+	EmbedMaxTokens int
+	// EmbedBatchSize is how many chunks are sent per /api/embed call.
+	EmbedBatchSize int
+	// EmbedConcurrency caps simultaneous embedding calls (1 fits a 2 GiB GPU).
+	EmbedConcurrency int
+	// EmbedKeepAlive keeps the embeddings model loaded between calls ("10m").
+	EmbedKeepAlive string
 	// RAGModel is the LLM used to answer questions with retrieved context.
 	RAGModel string
+	// RAGNumCtx is the context window requested from the generation model.
+	RAGNumCtx int
 	// RAGTopK is how many chunks are retrieved per question.
 	RAGTopK int
 	// ChunkSize / ChunkOverlap control document chunking (in characters).
@@ -43,11 +54,16 @@ const (
 	// e.g. "llama3.1:latest", "mistral:latest", "qwen2.5:7b".
 	defaultModelName = "llama3.1:latest"
 
-	defaultEmbedModel   = "nomic-embed-text" // 768 dimensiones
-	defaultRAGModel     = "mistral:latest"
-	defaultRAGTopK      = 5
-	defaultChunkSize    = 1800 // ~450 tokens por chunk
-	defaultChunkOverlap = 250
+	defaultEmbedModel       = "nomic-embed-text" // 768 dimensiones
+	defaultEmbedMaxTokens   = 2048               // n_ctx_train de nomic-embed-text
+	defaultEmbedBatch       = 8
+	defaultEmbedConcurrency = 1 // GPU de 2 GiB: una llamada de embeddings a la vez
+	defaultEmbedKeepAlive   = "10m"
+	defaultRAGModel         = "mistral:latest"
+	defaultRAGNumCtx        = 8192 // solo generación; el modelo de embeddings usa EmbedMaxTokens
+	defaultRAGTopK          = 5
+	defaultChunkSize        = 1800 // ~450 tokens por chunk
+	defaultChunkOverlap     = 250
 
 	defaultOracleUser     = ""
 	defaultOraclePassword = ""
@@ -63,11 +79,16 @@ func Load() Config {
 		WebPort:   NormalizePort(env("WEB_PORT", defaultWebPort)),
 		ModelName: env("MODEL_NAME", defaultModelName),
 
-		EmbedModel:   env("EMBED_MODEL", defaultEmbedModel),
-		RAGModel:     env("RAG_MODEL", defaultRAGModel),
-		RAGTopK:      envInt("RAG_TOP_K", defaultRAGTopK),
-		ChunkSize:    envInt("RAG_CHUNK_SIZE", defaultChunkSize),
-		ChunkOverlap: envInt("RAG_CHUNK_OVERLAP", defaultChunkOverlap),
+		EmbedModel:       env("EMBED_MODEL", defaultEmbedModel),
+		EmbedMaxTokens:   envInt("EMBED_MAX_TOKENS", defaultEmbedMaxTokens),
+		EmbedBatchSize:   envInt("EMBED_BATCH", defaultEmbedBatch),
+		EmbedConcurrency: envInt("EMBED_CONCURRENCY", defaultEmbedConcurrency),
+		EmbedKeepAlive:   env("EMBED_KEEP_ALIVE", defaultEmbedKeepAlive),
+		RAGModel:         env("RAG_MODEL", defaultRAGModel),
+		RAGNumCtx:        envInt("RAG_NUM_CTX", defaultRAGNumCtx),
+		RAGTopK:          envInt("RAG_TOP_K", defaultRAGTopK),
+		ChunkSize:        envInt("RAG_CHUNK_SIZE", defaultChunkSize),
+		ChunkOverlap:     envInt("RAG_CHUNK_OVERLAP", defaultChunkOverlap),
 
 		OracleUser:     env("ORACLE_USER", defaultOracleUser),
 		OraclePassword: env("ORACLE_PASSWORD", defaultOraclePassword),

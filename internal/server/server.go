@@ -38,7 +38,11 @@ func New(cfg config.Config) *Server {
 	if err != nil {
 		log.Printf("warning: embedded index.html missing (did you build the frontend?): %v", err)
 	}
-	ol := ollama.New(cfg.OllamaAPI)
+	ol := ollama.New(cfg.OllamaAPI,
+		ollama.WithEmbedConcurrency(cfg.EmbedConcurrency),
+		ollama.WithEmbedMaxTokens(cfg.EmbedMaxTokens),
+		ollama.WithEmbedKeepAlive(cfg.EmbedKeepAlive),
+	)
 	st, err := store.Open(cfg)
 	if err != nil {
 		log.Fatalf("open Oracle vector store: %v", err)

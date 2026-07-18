@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -26,11 +27,16 @@ const (
 	queryPrefix = "search_query: "
 )
 
-// embedBatchSize limita cuántos chunks se vectorizan por llamada a Ollama.
-const embedBatchSize = 16
+// maxSplitDepth acota cuántas veces se parte por la mitad un chunk que
+// Ollama rechaza por tamaño (2^4 = 16 sub-trozos como máximo).
+const maxSplitDepth = 4
 
 // maxContextChunkChars recorta cada chunk citado en el prompt.
 const maxContextChunkChars = 2000
+
+// embedFn abstrae la llamada de embeddings para poder probar la lógica de
+// troceo y recuperación sin un cliente Ollama real.
+type embedFn func(ctx context.Context, inputs []string) ([][]float32, error)
 
 // Service orquesta ingesta y consultas RAG.
 type Service struct {
@@ -58,7 +64,9 @@ func (e *ErrDuplicate) Error() string {
 
 // IngestAsync registra el documento y lanza el procesamiento en segundo
 // plano; el frontend sigue el avance consultando el estado. Si un intento
-// anterior del mismo archivo quedó en FAILED, se elimina y se reintenta.
+// anterior del mismo archivo quedó en FAILED, se reanuda sobre la misma fila:
+// los chunks ya embebidos se conservan y el pipeline continúa desde el
+// primero pendiente (los upserts garantizan que no se duplican vectores).
 func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte, uploadedBy string) (string, error) {
 	if err := s.store.EnsureReady(ctx); err != nil {
 		return "", err
@@ -76,11 +84,14 @@ func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte,
 			return "", &ErrDuplicate{Doc: existing}
 		}
 		raw, err := store.ParseID(existing.ID)
-		if err == nil {
-			if err := s.store.DeleteDocument(ctx, raw); err != nil {
-				return "", fmt.Errorf("limpiar intento fallido anterior: %w", err)
-			}
+		if err != nil {
+			return "", fmt.Errorf("identificador del intento anterior: %w", err)
 		}
+		if err := s.store.SetDocumentStatus(ctx, raw, store.StatusExtracting, ""); err != nil {
+			return "", fmt.Errorf("reanudar intento fallido anterior: %w", err)
+		}
+		go s.process(raw, fileName, data)
+		return existing.ID, nil
 	}
 
 	docID, err := s.store.CreateDocument(ctx, fileName, hash, int64(len(data)), uploadedBy)
@@ -95,13 +106,15 @@ func (s *Service) IngestAsync(ctx context.Context, fileName string, data []byte,
 
 // process ejecuta el pipeline completo sobre un documento ya registrado:
 // UPLOADED → EXTRACTING → CHUNKED → EMBEDDED (o FAILED con el motivo).
+// Es reanudable: los chunks ya persistidos de un intento anterior se saltan.
 func (s *Service) process(docID []byte, fileName string, data []byte) {
 	// Independiente de la petición HTTP: la ingesta sobrevive al upload.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
+	docHex := hex.EncodeToString(docID)
 	fail := func(stage string, err error) {
-		log.Printf("rag: ingesta de %q falló en %s: %v", fileName, stage, err)
+		log.Printf("rag: ingesta doc=%s (%q) falló en %s: %v", docHex, fileName, stage, err)
 		msg := fmt.Sprintf("%s: %v", stage, err)
 		if len(msg) > 3900 {
 			msg = msg[:3900]
@@ -131,8 +144,10 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		}
 	}
 
-	// 2. Chunking.
+	// 2. Chunking + tope duro: ningún chunk puede exceder el contexto del
+	// modelo de embeddings (estimación conservadora, prefijo incluido).
 	chunks := chunkPages(pages, s.cfg.ChunkSize, s.cfg.ChunkOverlap)
+	chunks = capChunks(chunks, ollama.MaxInputChars(s.cfg.EmbedMaxTokens)-len(docPrefix))
 	if len(chunks) == 0 {
 		fail("chunking", fmt.Errorf("el documento no produjo fragmentos de texto"))
 		return
@@ -142,33 +157,163 @@ func (s *Service) process(docID []byte, fileName string, data []byte) {
 		return
 	}
 
-	// 3. Embeddings por lotes + inserción en el vector store.
-	for from := 0; from < len(chunks); from += embedBatchSize {
-		batch := chunks[from:min(from+embedBatchSize, len(chunks))]
-		inputs := make([]string, len(batch))
-		for i, c := range batch {
-			inputs[i] = docPrefix + c.Text
+	// 3. Reanudación: se salta lo ya embebido en intentos anteriores.
+	done, err := s.store.EmbeddedChunkIndexes(ctx, docID)
+	if err != nil {
+		fail("consultar avance previo", err)
+		return
+	}
+	pending := pendingChunks(chunks, done)
+	if len(chunks) > len(pending) {
+		log.Printf("rag: doc=%s reanuda la ingesta: %d/%d chunks ya embebidos",
+			docHex, len(chunks)-len(pending), len(chunks))
+	}
+
+	// 4. Embeddings por lotes + upsert en el vector store.
+	if len(pending) > 0 {
+		// Precalentamiento: garantiza que el modelo de embeddings está
+		// cargado y respondiendo antes de encolar el documento completo.
+		if err := s.ollama.WarmEmbed(ctx, s.cfg.EmbedModel); err != nil {
+			fail("preparar modelo de embeddings", err)
+			return
 		}
-		vectors, err := s.ollama.Embed(ctx, s.cfg.EmbedModel, inputs)
-		if err != nil {
+	}
+	embed := func(ctx context.Context, inputs []string) ([][]float32, error) {
+		return s.ollama.Embed(ctx, s.cfg.EmbedModel, inputs)
+	}
+	batchSize := s.cfg.EmbedBatchSize
+	if batchSize <= 0 {
+		batchSize = 8
+	}
+	for from := 0; from < len(pending); from += batchSize {
+		batch := pending[from:min(from+batchSize, len(pending))]
+		if err := s.embedAndStore(ctx, docID, batch, embed); err != nil {
 			fail("embeddings", err)
 			return
 		}
-		for i, c := range batch {
-			if err := s.store.InsertChunk(ctx, docID, c.Index, c.Page, c.Text,
-				estimateTokens(c.Text), vectors[i], s.cfg.EmbedModel); err != nil {
-				fail("guardar chunks", err)
-				return
-			}
-		}
 	}
 
-	// 4. Listo: el documento forma parte de la base de conocimiento.
+	// 5. Poda de chunks sobrantes de intentos anteriores con otro troceo.
+	if err := s.store.DeleteChunksFrom(ctx, docID, len(chunks)); err != nil {
+		fail("podar chunks obsoletos", err)
+		return
+	}
+
+	// 6. Listo solo cuando todos los chunks están embebidos y persistidos.
 	if err := s.store.FinishDocument(ctx, docID, len(pages)); err != nil {
 		fail("finalizar documento", err)
 		return
 	}
-	log.Printf("rag: %q ingerido (%d páginas, %d chunks)", fileName, len(pages), len(chunks))
+	log.Printf("rag: doc=%s (%q) ingerido (%d páginas, %d chunks)", docHex, fileName, len(pages), len(chunks))
+}
+
+// pendingChunks filtra los chunks cuyo índice ya tiene embedding persistido.
+func pendingChunks(chunks []chunk, done map[int]bool) []chunk {
+	if len(done) == 0 {
+		return chunks
+	}
+	out := make([]chunk, 0, len(chunks))
+	for _, c := range chunks {
+		if !done[c.Index] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// embedAndStore vectoriza un lote y lo persiste chunk a chunk. La persistencia
+// es un upsert por (document_id, chunk_index), así que repetir un lote tras un
+// fallo transitorio no duplica vectores. Si Ollama rechaza el lote con un 400
+// por tamaño, se aísla cada chunk y el culpable se trocea (embedSplitting).
+func (s *Service) embedAndStore(ctx context.Context, docID []byte, batch []chunk, embed embedFn) error {
+	inputs := make([]string, len(batch))
+	payloadBytes := 0
+	for i, c := range batch {
+		inputs[i] = docPrefix + c.Text
+		payloadBytes += len(inputs[i])
+	}
+	docHex := hex.EncodeToString(docID)
+	first, last := batch[0].Index, batch[len(batch)-1].Index
+
+	start := time.Now()
+	vectors, err := embed(ctx, inputs)
+	if err != nil {
+		httpErr, ok := errors.AsType[*ollama.HTTPError](err)
+		if !ok || !httpErr.IsInputTooLarge() {
+			return fmt.Errorf("chunks %d-%d (%d bytes): %w", first, last, payloadBytes, err)
+		}
+		// El 400 indica tamaño de entrada: chunk a chunk, troceando el culpable.
+		log.Printf("rag: doc=%s chunks %d-%d rechazados por tamaño (HTTP 400: %s); troceando chunk a chunk",
+			docHex, first, last, httpErr.Body)
+		vectors = make([][]float32, len(batch))
+		for i, c := range batch {
+			vec, err := embedSplitting(ctx, embed, docPrefix, c.Text, maxSplitDepth)
+			if err != nil {
+				return fmt.Errorf("chunk %d (~%d tokens, %d bytes): %w",
+					c.Index, estimateTokens(c.Text), len(c.Text), err)
+			}
+			vectors[i] = vec
+		}
+	}
+	for i, c := range batch {
+		if err := s.store.InsertChunk(ctx, docID, c.Index, c.Page, c.Text,
+			estimateTokens(c.Text), vectors[i], s.cfg.EmbedModel); err != nil {
+			return fmt.Errorf("persistir chunk %d: %w", c.Index, err)
+		}
+	}
+	log.Printf("rag: doc=%s chunks %d-%d embebidos (n=%d bytes=%d latencia=%s)",
+		docHex, first, last, len(batch), payloadBytes, time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
+// embedSplitting vectoriza un texto; si Ollama responde 400 por tamaño lo
+// parte por la mitad, vectoriza los hijos (recursivo, con profundidad
+// acotada) y promedia sus vectores — equivalente bajo distancia coseno — de
+// modo que el chunk conserva su identidad, su índice y su texto completo.
+func embedSplitting(ctx context.Context, embed embedFn, prefix, text string, depth int) ([]float32, error) {
+	vecs, err := embed(ctx, []string{prefix + text})
+	if err == nil {
+		return vecs[0], nil
+	}
+	httpErr, ok := errors.AsType[*ollama.HTTPError](err)
+	if !ok || !httpErr.IsInputTooLarge() || depth <= 0 {
+		return nil, err
+	}
+	left, right := halveText(text)
+	if left == "" || right == "" {
+		return nil, err
+	}
+	lv, err := embedSplitting(ctx, embed, prefix, left, depth-1)
+	if err != nil {
+		return nil, err
+	}
+	rv, err := embedSplitting(ctx, embed, prefix, right, depth-1)
+	if err != nil {
+		return nil, err
+	}
+	return meanVec(lv, rv)
+}
+
+// halveText parte el texto cerca de la mitad, sobre un espacio si lo hay.
+func halveText(text string) (string, string) {
+	mid := len(text) / 2
+	cut := strings.LastIndexAny(text[:mid], " \n\t")
+	if cut <= 0 {
+		cut = mid
+	}
+	return strings.TrimSpace(text[:cut]), strings.TrimSpace(text[cut:])
+}
+
+// meanVec promedia dos vectores de la misma dimensión.
+func meanVec(a, b []float32) ([]float32, error) {
+	if len(a) != len(b) {
+		return nil, fmt.Errorf("dimensiones incompatibles al promediar (%d vs %d)", len(a), len(b))
+	}
+	out := make([]float32, len(a))
+	for i := range a {
+		out[i] = (a[i] + b[i]) / 2
+	}
+	return out, nil
 }
 
 // ── Consulta (retrieval + prompt) ────────────────────────────────────────
@@ -231,7 +376,7 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		Sources:  sources,
 		Messages: []ollama.Message{{Role: "user", Content: prompt}},
 		Model:    model,
-		Options:  map[string]any{"num_ctx": 8192, "temperature": 0.2},
+		Options:  map[string]any{"num_ctx": s.cfg.RAGNumCtx, "temperature": 0.2},
 	}, nil
 }
 

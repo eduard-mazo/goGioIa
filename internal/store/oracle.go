@@ -105,7 +105,7 @@ func (s *Store) seedTemplate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO prompt_templates (template_id, name, version, template_text, is_active)
 		 VALUES (:1, :2, 1, :3, 'Y')`,
-		newID(), defaultTemplateName, go_ora.Clob{String: defaultTemplateText})
+		newID(), defaultTemplateName, clob(defaultTemplateText))
 	return err
 }
 
@@ -136,6 +136,22 @@ func SessionID(clientID string) []byte {
 	return sum[:16]
 }
 
+// derivedID genera un RAW(16) determinista para páginas y chunks: reintentos
+// e ingestas reanudadas apuntan siempre a la misma fila (sin duplicados).
+func derivedID(kind string, docID []byte, n int) []byte {
+	h := sha256.New()
+	h.Write([]byte(kind))
+	h.Write(docID)
+	fmt.Fprintf(h, ":%d", n)
+	return h.Sum(nil)[:16]
+}
+
+// clob envuelve un string como CLOB de entrada. go-ora v2.9 exige Valid=true:
+// sin él bindea NULL aunque String tenga contenido (ORA-01400 en NOT NULL).
+func clob(s string) go_ora.Clob {
+	return go_ora.Clob{String: s, Valid: true}
+}
+
 // vecLiteral serializa un embedding al literal que acepta TO_VECTOR: [x,y,...].
 // Se envía como CLOB porque 768 floats superan los 4000 bytes de VARCHAR2.
 func vecLiteral(v []float32) go_ora.Clob {
@@ -149,7 +165,7 @@ func vecLiteral(v []float32) go_ora.Clob {
 		b.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
 	}
 	b.WriteByte(']')
-	return go_ora.Clob{String: b.String()}
+	return clob(b.String())
 }
 
 // ── Documentos ───────────────────────────────────────────────────────────
@@ -286,25 +302,88 @@ func (s *Store) DeleteDocument(ctx context.Context, id []byte) error {
 	return tx.Commit()
 }
 
-// InsertPage guarda el texto extraído de una página.
+// InsertPage guarda el texto extraído de una página. Upsert por
+// (document_id, page_number) con id determinista: re-extraer un documento al
+// reanudar una ingesta fallida no viola uq_doc_page ni duplica filas.
 func (s *Store) InsertPage(ctx context.Context, docID []byte, pageNumber int, text string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO document_pages (page_id, document_id, page_number, raw_text)
-		VALUES (:1, :2, :3, :4)`,
-		newID(), docID, pageNumber, go_ora.Clob{String: text})
+		MERGE INTO document_pages p
+		USING (SELECT :1 AS document_id, :2 AS page_number FROM dual) src
+		ON (p.document_id = src.document_id AND p.page_number = src.page_number)
+		WHEN MATCHED THEN UPDATE SET p.raw_text = :3
+		WHEN NOT MATCHED THEN INSERT (page_id, document_id, page_number, raw_text)
+		VALUES (:4, :5, :6, :7)`,
+		docID, pageNumber, clob(text),
+		derivedID("page", docID, pageNumber), docID, pageNumber, clob(text))
 	return err
 }
 
-// InsertChunk guarda un chunk con su embedding (literal → TO_VECTOR).
+// InsertChunk guarda un chunk con su embedding (literal → TO_VECTOR). Upsert
+// por (document_id, chunk_index) con id determinista: reintentar un lote tras
+// un fallo transitorio nunca duplica vectores.
 func (s *Store) InsertChunk(ctx context.Context, docID []byte, index, page int, text string, tokenCount int, embedding []float32, model string) error {
+	vec := vecLiteral(embedding)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO document_chunks
+		MERGE INTO document_chunks c
+		USING (SELECT :1 AS document_id, :2 AS chunk_index FROM dual) src
+		ON (c.document_id = src.document_id AND c.chunk_index = src.chunk_index)
+		WHEN MATCHED THEN UPDATE SET
+		  c.page_number = :3, c.chunk_text = :4, c.token_count = :5,
+		  c.embedding = TO_VECTOR(:6), c.embedding_model = :7, c.embedded_at = SYSTIMESTAMP
+		WHEN NOT MATCHED THEN INSERT
 		  (chunk_id, document_id, chunk_index, page_number, chunk_text, token_count,
 		   embedding, embedding_model, embedded_at)
-		VALUES (:1, :2, :3, :4, :5, :6, TO_VECTOR(:7), :8, SYSTIMESTAMP)`,
-		newID(), docID, index, page, go_ora.Clob{String: text}, tokenCount,
-		vecLiteral(embedding), model)
+		VALUES (:8, :9, :10, :11, :12, :13, TO_VECTOR(:14), :15, SYSTIMESTAMP)`,
+		docID, index, page, clob(text), tokenCount, vec, model,
+		derivedID("chunk", docID, index), docID, index, page, clob(text), tokenCount, vec, model)
 	return err
+}
+
+// EmbeddedChunkIndexes devuelve los índices de chunk del documento que ya
+// tienen embedding persistido, para reanudar una ingesta sin repetir trabajo.
+func (s *Store) EmbeddedChunkIndexes(ctx context.Context, docID []byte) (map[int]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chunk_index FROM document_chunks
+		WHERE document_id = :1 AND embedding IS NOT NULL`, docID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	done := map[int]bool{}
+	for rows.Next() {
+		var idx int
+		if err := rows.Scan(&idx); err != nil {
+			return nil, err
+		}
+		done[idx] = true
+	}
+	return done, rows.Err()
+}
+
+// DeleteChunksFrom elimina los chunks con índice >= fromIndex: restos de un
+// intento anterior troceado con otra configuración. Limpia primero
+// rag_retrieved_chunks porque su FK a document_chunks no tiene CASCADE.
+func (s *Store) DeleteChunksFrom(ctx context.Context, docID []byte, fromIndex int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM rag_retrieved_chunks WHERE chunk_id IN (
+			SELECT chunk_id FROM document_chunks
+			WHERE document_id = :1 AND chunk_index >= :2)`,
+		docID, fromIndex); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM document_chunks WHERE document_id = :1 AND chunk_index >= :2`,
+		docID, fromIndex); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ── Búsqueda vectorial ───────────────────────────────────────────────────
@@ -365,7 +444,7 @@ func (s *Store) CreateQuery(ctx context.Context, sessionID []byte, userID, quest
 		INSERT INTO rag_queries
 		  (query_id, session_id, user_id, query_text, query_embedding, llm_model, prompt_template_id)
 		VALUES (:1, :2, :3, :4, TO_VECTOR(:5), :6, :7)`,
-		id, sessionID, nullable(userID), go_ora.Clob{String: question},
+		id, sessionID, nullable(userID), clob(question),
 		vecLiteral(embedding), llmModel, templateID)
 	if err != nil {
 		return nil, err
@@ -393,7 +472,7 @@ func (s *Store) LogRetrievedChunks(ctx context.Context, queryID []byte, results 
 func (s *Store) SetQueryResponse(ctx context.Context, queryID []byte, response string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE rag_queries SET response_text = :1 WHERE query_id = :2`,
-		go_ora.Clob{String: response}, queryID)
+		clob(response), queryID)
 	return err
 }
 

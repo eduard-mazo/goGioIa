@@ -51,6 +51,22 @@ Environment=WEB_PORT=:8080
 Environment=OLLAMA_API=http://10.14.16.193:9091/api/chat
 Environment=MODEL_NAME=llama3
 
+# ── RAG / embeddings — los valores por defecto ya son seguros para una GPU
+# pequeña (2 GiB); descomenta solo para ajustar:
+# Environment=EMBED_MODEL=nomic-embed-text
+# Environment=EMBED_MAX_TOKENS=2048      # contexto (n_ctx_train) del modelo de embeddings
+# Environment=EMBED_CONCURRENCY=1        # llamadas de embeddings simultáneas
+# Environment=EMBED_BATCH=8              # chunks por llamada /api/embed
+# Environment=EMBED_KEEP_ALIVE=10m       # mantiene el modelo cargado entre lotes
+# Environment=RAG_CHUNK_SIZE=1800        # caracteres por chunk (~450 tokens)
+# Environment=RAG_CHUNK_OVERLAP=250
+#
+# En el HOST de Ollama (no aquí) se recomienda, con una GPU de 2 GiB, evitar
+# el paralelismo y las cargas simultáneas de modelos que provocan expulsiones
+# y reinicios del runner a mitad de una ingesta:
+#   OLLAMA_NUM_PARALLEL=1
+#   OLLAMA_MAX_LOADED_MODELS=1
+
 # App sin estado + binario estático en un puerto >1024 => no requiere
 # capacidades ni sistema de archivos escribible.
 ReadOnly=true
