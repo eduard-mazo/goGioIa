@@ -48,8 +48,29 @@ PublishPort=8080:8080
 
 # Configuración por entorno (equivale a las flags --port/--ollama/--model).
 Environment=WEB_PORT=:8080
-Environment=OLLAMA_API=http://10.14.16.193:9091/api/chat
+Environment=OLLAMA_API=http://127.0.0.1:11434/api/chat
 Environment=MODEL_NAME=llama3
+
+# ── Alternativa: archivo de configuración ─────────────────────────────────
+# En vez de enumerar cada clave aquí, apunta a un archivo (mismo formato que
+# gogioia.env.example, incluido en el paquete). Es lo recomendable para la
+# password de Oracle: no queda en esta unidad ni en el journal.
+#
+#   mkdir -p ~/.config/gogioia
+#   cp gogioia.env.example ~/.config/gogioia/gogioia.env   # y editarlo
+#   chmod 600 ~/.config/gogioia/gogioia.env
+#
+# EnvironmentFile=%h/.config/gogioia/gogioia.env
+#
+# Lo lee podman en el HOST, como tu usuario, y lo inyecta como variables de
+# entorno: con chmod 600 basta. Usa solo CLAVE=valor, sin `export` ni comillas.
+#
+# (Montar el archivo dentro del contenedor y apuntar GOGIOIA_CONFIG a él
+# también funciona, pero en rootless el proceso corre como el UID 65534 ya
+# mapeado, así que tendrías que aflojar los permisos para que pueda leerlo.)
+#
+# Precedencia: flag > entorno > archivo > default. Las claves que dejes arriba
+# como Environment= ganan a las del archivo.
 
 # ── RAG / embeddings — los valores por defecto ya son seguros para una GPU
 # pequeña (2 GiB); descomenta solo para ajustar:

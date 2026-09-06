@@ -127,11 +127,35 @@ modelos/Ollama, integridad de datos y configuración efectiva.
 
 ## Configuration
 
-Defaults live in `internal/config/config.go` and can be overridden by env vars:
+Precedence, highest first:
+
+```
+flag  >  variable de entorno  >  archivo de configuración  >  default
+```
+
+Copy `gogioia.env.example` next to the binary as **`gogioia.env`** and edit it —
+it is loaded automatically at startup. Search order when `--config` is not
+given: `GOGIOIA_CONFIG`, then `gogioia.env` / `.env` next to the executable,
+then the same two in the working directory. `KEY=value` format, `#` comments,
+optional quotes; CRLF and the Notepad BOM are handled. Both `gogioia.env` and
+`.env` are gitignored — only the `.example` is versioned.
+
+```bash
+cp gogioia.env.example gogioia.env && $EDITOR gogioia.env
+./bin/gogioia                              # autodiscovery
+./bin/gogioia --config /etc/gogioia.env    # explicit path
+```
+
+The effective value of every key, and where it came from (`file` /
+`environment` / `flag` / `default` / `code`), is listed at
+`/api/rag/ops/config` and in the ops dashboard's **Configuración** tab.
+
+Defaults live in `internal/config/config.go`; every key below can be set in the
+config file or as an env var, same names:
 
 | Variable            | Default                             | Description                          |
 | ------------------- | ----------------------------------- | ------------------------------------ |
-| `OLLAMA_API`        | `http://10.14.16.193:9091/api/chat` | Ollama chat endpoint URL             |
+| `OLLAMA_API`        | `http://127.0.0.1:11434/api/chat`   | Ollama chat endpoint URL             |
 | `WEB_PORT`          | `:8080`                             | HTTP listen address                  |
 | `MODEL_NAME`        | `llama3.1:latest`                   | Default chat model (see below)       |
 | `EMBED_MODEL`       | `nomic-embed-text`                  | Embeddings model (768 dims)          |
@@ -140,9 +164,9 @@ Defaults live in `internal/config/config.go` and can be overridden by env vars:
 | `RAG_CHUNK_SIZE`    | `1800`                              | Chunk size (characters)              |
 | `RAG_CHUNK_OVERLAP` | `250`                               | Chunk overlap (characters)           |
 | `OPS_HEALTH_TTL`    | `60`                                | Ops-dashboard health cache (seconds) |
-| `ORACLE_USER`       | `useria`                            | Oracle 23ai user                     |
-| `ORACLE_PASSWORD`   | *(built-in)*                        | Oracle password                      |
-| `ORACLE_HOST`       | `10.14.16.193`                      | Oracle host                          |
+| `ORACLE_USER`       | *(sin default)*                     | Oracle 23ai user                     |
+| `ORACLE_PASSWORD`   | *(sin default)*                     | Oracle password                      |
+| `ORACLE_HOST`       | `127.0.0.1`                         | Oracle host                          |
 | `ORACLE_PORT`       | `1521`                              | Oracle listener port                 |
 | `ORACLE_SID`        | `orcl`                              | Oracle SID                           |
 
@@ -174,6 +198,37 @@ make dev        # terminal 2 — Vite on :5173, proxies /api to :8080
 
 Open <http://localhost:5173> for live-reloading development.
 
+## Cross-compile & package
+
+Every target is static (`CGO_ENABLED=0`) with the frontend embedded, so each
+build is a single self-contained file — no Node, no Go, no Oracle Instant
+Client on the destination.
+
+```bash
+make build-windows        # bin/gogioia-windows-amd64.exe
+make build-windows-arm64  # bin/gogioia-windows-arm64.exe
+make build-linux          # bin/gogioia-linux-amd64
+make build-linux-arm64    # bin/gogioia-linux-arm64
+make build-darwin         # bin/gogioia-darwin-arm64   (Apple Silicon)
+make build-darwin-amd64   # bin/gogioia-darwin-amd64
+make build-ppc64le        # bin/gogioia-linux-ppc64le
+make cross                # all of the above, one frontend build
+```
+
+Packaging adds the config template and the deployment docs next to the binary:
+
+```bash
+make dist-windows   # dist/gogioia-windows-amd64.zip   → .exe + gogioia.env.example + DEPLOY-WINDOWS.md
+make dist-linux     # dist/gogioia-linux-amd64.tar.gz  → + gogioia.container
+make dist-darwin    # dist/gogioia-darwin-arm64.tar.gz
+make dist-ppc64le   # dist/gogioia-linux-ppc64le.tar.gz
+make dist           # all four
+```
+
+Unpack on the target, rename `gogioia.env.example` to `gogioia.env`, edit it,
+and run the binary — it picks the file up from its own directory. Windows
+step-by-step: [DEPLOY-WINDOWS.md](DEPLOY-WINDOWS.md).
+
 ## Deploy to ppc64le (offline / air-gapped)
 
 goGioIa is a pure-Go, CGO-free binary with the frontend embedded, so it
@@ -204,7 +259,9 @@ The Podman **quadlet** unit (`deploy/gogioia.container`) runs the image
 **rootless** with `Pull=never`, `ReadOnly=true`, `NoNewPrivileges=true`,
 `DropCapability=ALL`, as UID/GID `65534` inside the user namespace, publishing
 only `:8080`. Configure it via the `WEB_PORT`, `OLLAMA_API`, and `MODEL_NAME`
-environment variables.
+environment variables, or point `EnvironmentFile=` at a `gogioia.env` on the
+host (see the commented block in `deploy/gogioia.container`) to keep the Oracle
+password out of the unit file.
 
 ### Stateless — including PDFs
 

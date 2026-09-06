@@ -1,5 +1,7 @@
 # Go
 /bin/
+# Paquetes de despliegue (make dist)
+/dist/
 *.exe
 *.test
 *.out
@@ -22,3 +24,8 @@ npm-debug.log*
 
 # Credenciales locales de desarrollo (nunca se versionan)
 /deploy/dev.local.env
+
+# Configuración de despliegue: contiene la password de Oracle. Solo se versiona
+# la plantilla gogioia.env.example.
+gogioia.env
+.env

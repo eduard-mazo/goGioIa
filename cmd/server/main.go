@@ -18,25 +18,36 @@ import (
 )
 
 func main() {
-	// Flags default to the env/compile-time config, so precedence is
-	// flag > environment variable > default.
-	cfg := config.Load()
-	port := flag.String("port", cfg.WebPort, "HTTP listen address (e.g. :8080 or 8080)")
-	ollama := flag.String("ollama", cfg.OllamaAPI, "Ollama chat endpoint URL")
-	model := flag.String("model", cfg.ModelName, "default Ollama model name")
+	// Los flags se dejan vacíos para distinguir "sin indicar" de "igual al
+	// default": la precedencia es flag > variable de entorno > archivo de
+	// configuración > default.
+	confPath := flag.String("config", "", "ruta del archivo de configuración (por defecto: gogioia.env o .env junto al ejecutable)")
+	port := flag.String("port", "", "HTTP listen address (e.g. :8080 or 8080)")
+	ollama := flag.String("ollama", "", "Ollama chat endpoint URL")
+	model := flag.String("model", "", "default Ollama model name")
 	flag.Parse()
+
+	cfg := config.LoadFrom(*confPath)
+	if cfg.ConfigFileError != "" {
+		// Una ruta pedida a mano que no se puede leer es un error de
+		// despliegue; el descubrimiento automático solo avisa.
+		if *confPath != "" || os.Getenv(config.EnvFileVar) != "" {
+			log.Fatalf("no se pudo leer el archivo de configuración: %s", cfg.ConfigFileError)
+		}
+		log.Printf("aviso: %s", cfg.ConfigFileError)
+	}
 
 	// Al sobrescribir por flag, se refleja la procedencia (página de
 	// configuración del dashboard de operaciones).
-	if p := config.NormalizePort(*port); p != cfg.WebPort {
+	if *port != "" {
 		cfg.Sources["WEB_PORT"] = "flag"
-		cfg.WebPort = p
+		cfg.WebPort = config.NormalizePort(*port)
 	}
-	if *ollama != cfg.OllamaAPI {
+	if *ollama != "" {
 		cfg.Sources["OLLAMA_API"] = "flag"
 		cfg.OllamaAPI = *ollama
 	}
-	if *model != cfg.ModelName {
+	if *model != "" {
 		cfg.Sources["MODEL_NAME"] = "flag"
 		cfg.ModelName = *model
 	}
@@ -51,6 +62,11 @@ func main() {
 
 	go func() {
 		log.Printf("🚀 goGioIa listening on http://localhost%s", cfg.WebPort)
+		if cfg.ConfigFile != "" {
+			log.Printf("   config = %s", cfg.ConfigFile)
+		} else {
+			log.Printf("   config = (sin archivo; entorno y defaults)")
+		}
 		log.Printf("   model = %s", cfg.ModelName)
 		log.Printf("   ollama = %s", cfg.OllamaAPI)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

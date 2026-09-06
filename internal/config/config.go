@@ -50,10 +50,16 @@ type Config struct {
 	// Ollama, readiness del modelo): la UI puede refrescar sin re-sondear.
 	OpsHealthTTLSeconds int
 
-	// Sources registra la procedencia de cada clave ("environment" |
+	// Sources registra la procedencia de cada clave ("environment" | "file" |
 	// "default"; main.go la sube a "flag" si un flag la sobrescribe). La
 	// consume la página de configuración del dashboard de operaciones.
 	Sources map[string]string
+
+	// ConfigFile es la ruta del archivo de configuración aplicado, vacía si no
+	// se encontró ninguno. ConfigFileError describe por qué no se pudo leer un
+	// archivo que sí se esperaba (ruta explícita inexistente, permisos…).
+	ConfigFile      string
+	ConfigFileError string
 }
 
 // Defaults. Override any of these with the matching environment variable.
@@ -84,22 +90,59 @@ const (
 	defaultOracleSID      = "orcl"
 )
 
-// Load builds a Config from the environment, applying defaults where unset.
-// Junto a cada valor se registra su procedencia en Sources.
-func Load() Config {
+// Load resuelve la configuración buscando el archivo de configuración en las
+// ubicaciones habituales. Equivale a LoadFrom("").
+func Load() Config { return LoadFrom("") }
+
+// LoadFrom resuelve la configuración con la precedencia:
+//
+//	variable de entorno > archivo de configuración > default
+//
+// (main.go añade los flags por encima de todo). Con path vacío se buscan
+// GOGIOIA_CONFIG, gogioia.env y .env junto al ejecutable y en el directorio
+// de trabajo; el archivo es opcional. Junto a cada valor se registra su
+// procedencia en Sources.
+func LoadFrom(path string) Config {
+	if path == "" {
+		path = findConfigFile()
+	}
+	var (
+		fileValues = map[string]string{}
+		fileErr    string
+		fileUsed   string
+	)
+	if path != "" {
+		v, err := readEnvFile(path)
+		if err != nil {
+			fileErr = err.Error()
+		} else {
+			fileValues, fileUsed = v, path
+		}
+	}
+
 	sources := map[string]string{}
-	env := func(key, fallback string) string {
+	// lookup aplica la precedencia entorno > archivo y devuelve la procedencia.
+	lookup := func(key string) (string, string, bool) {
 		if v := os.Getenv(key); v != "" {
-			sources[key] = "environment"
+			return v, "environment", true
+		}
+		if v, ok := fileValues[key]; ok && v != "" {
+			return v, "file", true
+		}
+		return "", "", false
+	}
+	env := func(key, fallback string) string {
+		if v, src, ok := lookup(key); ok {
+			sources[key] = src
 			return v
 		}
 		sources[key] = "default"
 		return fallback
 	}
 	envInt := func(key string, fallback int) int {
-		if v := os.Getenv(key); v != "" {
+		if v, src, ok := lookup(key); ok {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				sources[key] = "environment"
+				sources[key] = src
 				return n
 			}
 		}
@@ -130,7 +173,9 @@ func Load() Config {
 		OraclePort:     envInt("ORACLE_PORT", defaultOraclePort),
 		OracleSID:      env("ORACLE_SID", defaultOracleSID),
 
-		Sources: sources,
+		Sources:         sources,
+		ConfigFile:      fileUsed,
+		ConfigFileError: fileErr,
 	}
 }
 

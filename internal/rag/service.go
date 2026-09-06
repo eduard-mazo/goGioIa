@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +38,10 @@ const maxSplitDepth = 4
 
 // maxContextChunkChars recorta cada chunk citado en el prompt.
 const maxContextChunkChars = 2000
+
+// maxChunksPerDoc topa cuántos chunks de un mismo documento entran al top-K
+// final (ver diversifySources).
+const maxChunksPerDoc = 2
 
 // embedFn abstrae la llamada de embeddings para poder probar la lógica de
 // troceo y recuperación sin un cliente Ollama real.
@@ -381,12 +386,17 @@ func (s *Service) PrepareAsk(ctx context.Context, question, model, sessionID, us
 		return nil, fmt.Errorf("vectorizar la pregunta: %w", err)
 	}
 
-	// 2. Retrieval por similitud coseno.
+	// 2. Retrieval por similitud coseno. Se piden más candidatos de los que
+	// entran al prompt para poder diversificar por documento: un manual
+	// grande no debe acaparar todas las fuentes si otro documento también
+	// tiene chunks afines (visto en producción: un manual de 714 chunks
+	// desplazaba siempre al documento de 32 que tenía la respuesta).
 	retrievalStart := time.Now()
-	sources, err := s.store.SearchChunks(ctx, qVec, s.cfg.RAGTopK)
+	candidates, err := s.store.SearchChunks(ctx, qVec, s.cfg.RAGTopK*3)
 	if err != nil {
 		return nil, fmt.Errorf("búsqueda vectorial: %w", err)
 	}
+	sources := diversifySources(candidates, s.cfg.RAGTopK, maxChunksPerDoc)
 	retrievalLatency := time.Since(retrievalStart)
 
 	// 3. Prompt desde la plantilla activa (versionada en prompt_templates).
@@ -458,6 +468,40 @@ func (s *Service) Feedback(ctx context.Context, queryIDHex string, rating int, c
 		return fmt.Errorf("rating fuera de rango (-1, 0, 1)")
 	}
 	return s.store.InsertFeedback(ctx, id, rating, comment, createdBy)
+}
+
+// diversifySources elige topK resultados respetando un máximo por documento
+// (los candidatos vienen ordenados por afinidad). Si con el cupo no se llena
+// el topK (p.ej. solo hay un documento), se rellena con los mejores restantes.
+func diversifySources(candidates []store.SearchResult, topK, maxPerDoc int) []store.SearchResult {
+	if len(candidates) <= topK {
+		return candidates
+	}
+	out := make([]store.SearchResult, 0, topK)
+	taken := make(map[int]bool, topK)
+	perDoc := make(map[string]int)
+	for i, c := range candidates {
+		if len(out) == topK {
+			return out
+		}
+		if perDoc[c.DocumentID] >= maxPerDoc {
+			continue
+		}
+		perDoc[c.DocumentID]++
+		taken[i] = true
+		out = append(out, c)
+	}
+	for i, c := range candidates {
+		if len(out) == topK {
+			break
+		}
+		if !taken[i] {
+			out = append(out, c)
+		}
+	}
+	// Restaurar el orden por afinidad tras el relleno.
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Similarity > out[b].Similarity })
+	return out
 }
 
 // renderPrompt sustituye {context} y {question} en la plantilla.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/ledongthuc/pdf"
 )
@@ -17,6 +18,11 @@ var (
 	trailingWS  = regexp.MustCompile(`[ \t]+\n`)
 	blankRuns   = regexp.MustCompile(`\n{3,}`)
 	multiSpaces = regexp.MustCompile(`[ \t]{2,}`)
+	// dotLeaders son las líneas de puntos de los índices («Título ...... 32»):
+	// páginas enteras de puntos producían chunks sin señal que contaminaban el
+	// retrieval. 4+ puntos seguidos (con o sin espacios) no aparecen en prosa
+	// ni en números de versión, así que se colapsan a un espacio.
+	dotLeaders = regexp.MustCompile(`(?:\.[ \t]*){4,}`)
 )
 
 // normalize tidies the raw extractor output: normalises line endings, strips
@@ -24,6 +30,7 @@ var (
 // wasted tokens without altering the document's wording.
 func normalize(s string) string {
 	s = newlines.Replace(s)
+	s = dotLeaders.ReplaceAllString(s, " ")
 	s = trailingWS.ReplaceAllString(s, "\n")
 	s = multiSpaces.ReplaceAllString(s, " ")
 	s = blankRuns.ReplaceAllString(s, "\n\n")
@@ -56,6 +63,7 @@ func ExtractPages(data []byte) (pages []Page, err error) {
 		text := extractPageText(reader, i)
 		pages = append(pages, Page{Number: i, Text: text})
 	}
+	pages = stripBoilerplate(pages)
 
 	empty := true
 	for _, p := range pages {
@@ -68,6 +76,66 @@ func ExtractPages(data []byte) (pages []Page, err error) {
 		return nil, fmt.Errorf("no se encontró texto (el PDF puede ser solo imagen / escaneado; aplique OCR externo antes de subirlo)")
 	}
 	return pages, nil
+}
+
+// stripBoilerplate elimina encabezados y pies de página: toda línea cuya
+// forma normalizada se repite en buena parte de las páginas es plantilla de
+// página, no contenido. Repetida en cada chunk, esa línea contamina el
+// retrieval: todos los chunks del manual se parecen a cualquier consulta que
+// mencione el nombre del producto.
+func stripBoilerplate(pages []Page) []Page {
+	if len(pages) < 4 {
+		return pages
+	}
+	counts := make(map[string]int)
+	for _, p := range pages {
+		seen := make(map[string]bool)
+		for _, line := range strings.Split(p.Text, "\n") {
+			key := lineKey(line)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			counts[key]++
+		}
+	}
+	threshold := max(3, len(pages)*2/5)
+	out := make([]Page, 0, len(pages))
+	for _, p := range pages {
+		var b strings.Builder
+		for _, line := range strings.Split(p.Text, "\n") {
+			if key := lineKey(line); key != "" && counts[key] >= threshold {
+				continue
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		out = append(out, Page{Number: p.Number, Text: strings.TrimSpace(b.String())})
+	}
+	return out
+}
+
+// lineKey normaliza una línea para compararla entre páginas: minúsculas, sin
+// dígitos (los números de página cambian) y espacios colapsados. Las líneas
+// largas nunca son encabezados y las muy cortas tras quitar dígitos no dan
+// evidencia suficiente; ambas devuelven "" (no comparables).
+func lineKey(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" || len(line) > 120 {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range line {
+		if unicode.IsDigit(r) {
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	key := strings.Join(strings.Fields(b.String()), " ")
+	if len(key) < 4 {
+		return ""
+	}
+	return key
 }
 
 // extractPageText parses one page, converting parser panics into empty text

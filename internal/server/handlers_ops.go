@@ -370,7 +370,7 @@ func (s *Server) handleOpsIntegrity(w http.ResponseWriter, r *http.Request) {
 type configEntry struct {
 	Key    string `json:"key"`
 	Value  string `json:"value"`
-	Source string `json:"source"` // environment | flag | default | code
+	Source string `json:"source"` // environment | file | flag | default | code
 	Secret bool   `json:"secret,omitempty"`
 }
 
@@ -401,6 +401,7 @@ func (s *Server) handleOpsConfig(w http.ResponseWriter, _ *http.Request) {
 		{Key: "ORACLE_PASSWORD", Value: "••••••••", Source: src("ORACLE_PASSWORD"), Secret: true},
 		{Key: "WEB_PORT", Value: s.cfg.WebPort, Source: src("WEB_PORT")},
 		// Valores fijados en código (no configurables por entorno).
+		{Key: "CONFIG_FILE", Value: configFileLabel(s.cfg.ConfigFile), Source: "code"},
 		{Key: "VECTOR_DIMENSION", Value: "768", Source: "code"},
 		{Key: "DOC_PREFIX", Value: rag.DocPrefix, Source: "code"},
 		{Key: "QUERY_PREFIX", Value: rag.QueryPrefix, Source: "code"},
@@ -408,6 +409,15 @@ func (s *Server) handleOpsConfig(w http.ResponseWriter, _ *http.Request) {
 		{Key: "PROMPT_TEMPLATE", Value: "rag-default (prompt_templates, versionada en BD)", Source: "code"},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
+// configFileLabel describe el archivo de configuración aplicado; sin archivo,
+// la configuración viene solo del entorno y los defaults.
+func configFileLabel(path string) string {
+	if path == "" {
+		return "(ninguno)"
+	}
+	return path
 }
 
 // ── Utilidades ───────────────────────────────────────────────────────────

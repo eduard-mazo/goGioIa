@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Vista «Configuración»: valores efectivos en solo lectura, con su
-// procedencia (environment | flag | default | code). Los secretos nunca
+// procedencia (environment | file | flag | default | code). Los secretos nunca
 // llegan del servidor (solo su procedencia). No hay edición: la app no tiene
 // un mecanismo seguro de configuración en caliente.
 import { ref } from 'vue'
@@ -27,6 +27,7 @@ defineExpose({ load })
 
 const sourceLabel: Record<string, string> = {
   environment: 'variable de entorno',
+  file: 'archivo de configuración',
   flag: 'flag de arranque',
   default: 'valor por defecto',
   code: 'fijado en código',
@@ -49,7 +50,8 @@ const hints: Record<string, string> = {
 <template>
   <div class="space-y-3">
     <p class="text-xs text-muted-foreground">
-      Configuración efectiva en solo lectura. Para cambiarla: variables de entorno del contenedor
+      Configuración efectiva en solo lectura. Para cambiarla: el archivo de configuración
+      (gogioia.env junto al ejecutable), variables de entorno del contenedor
       (deploy/gogioia.container) o flags de arranque. Los valores secretos no se muestran.
     </p>
 
